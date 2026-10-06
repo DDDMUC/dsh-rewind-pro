@@ -327,6 +327,35 @@ export function apply(ctx: ClientContext, injectedConfig?: Partial<PluginConfig>
   // as well: without candidates there are no buttons at all.
   void loadCandidates()
 
+  /**
+   * Follow the conversation the GUI is showing.
+   *
+   * Switching chats does not reload the page, so nothing re-activates this half:
+   * a session id read once is the *previous* chat a moment later, and every
+   * request then answers for the wrong conversation — the give-away was the dock
+   * pill reporting the same "hidden" count in every chat.
+   *
+   * Re-resolved on DOM activity rather than on a timer: the client facade
+   * shadows ambient `setInterval`, and a conversation switch always rewrites the
+   * transcript.
+   */
+  let sessionFrame = 0
+  const followSession = (): void => {
+    sessionFrame = 0
+    const next = resolveSessionId(ctx) || 'unknown'
+    if (!store.setSession(next)) return
+    // Everything cached belonged to the other session.
+    candidates = []
+    buttons?.refresh()
+    render()
+    void loadCandidates()
+  }
+  const sessionObserver = new MutationObserver(() => {
+    if (sessionFrame) return
+    sessionFrame = requestAnimationFrame(followSession)
+  })
+  sessionObserver.observe(document.body, { childList: true, subtree: true })
+
   const registered = registerSlots(ctx, text, config, store)
 
   // The ↶ control itself is injected into each user row: that is where people
@@ -342,6 +371,8 @@ export function apply(ctx: ClientContext, injectedConfig?: Partial<PluginConfig>
   })
 
   const dispose = (): void => {
+    if (sessionFrame) cancelAnimationFrame(sessionFrame)
+    sessionObserver.disconnect()
     unsubscribe()
     stopEvents()
     buttons?.dispose()

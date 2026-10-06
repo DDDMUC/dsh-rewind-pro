@@ -151,6 +151,41 @@ describe('client half entry', () => {
     expect(calls.every((url) => url.includes('sessionId=unknown'))).toBe(true)
   })
 
+  it('follows the GUI when another conversation is opened', async () => {
+    // Switching chats does not reload the page, so the client half has to notice
+    // by itself; otherwise every request keeps answering for the chat that was
+    // open at load time (the dock pill showed the same count in every chat).
+    const data = new Map<string, string>([['dsh.sessions.current', '{"sessionId":"session-one"}']])
+    const storage = {
+      getItem: (key: string) => data.get(key) ?? null,
+      setItem: (key: string, value: string) => void data.set(key, value),
+      removeItem: (key: string) => void data.delete(key),
+      clear: () => data.clear(),
+      key: (index: number) => [...data.keys()][index] ?? null,
+      get length() {
+        return data.size
+      },
+    }
+    Object.defineProperty(window, 'localStorage', { value: storage, configurable: true })
+
+    const calls: string[] = []
+    vi.stubGlobal('fetch', async (url: unknown) => {
+      calls.push(String(url))
+      return { ok: false, json: async () => ({}) }
+    })
+    const ctx = guardedContext({ slots: noopSlots })
+    const handle = apply(ctx as never)
+    dispose = handle.dispose
+    await vi.waitFor(() => expect(calls.some((url) => url.includes('sessionId=session-one'))).toBe(true))
+
+    calls.length = 0
+    data.set('dsh.sessions.current', '{"sessionId":"session-two"}')
+    // A conversation switch rewrites the transcript; that is the signal we ride.
+    document.body.append(document.createElement('div'))
+    await vi.waitFor(() => expect(calls.some((url) => url.includes('sessionId=session-two'))).toBe(true))
+    expect(calls.every((url) => !url.includes('sessionId=session-one'))).toBe(true)
+  })
+
   it('a superseded activation can no longer tear the live surface down', () => {
     // The bug this pins: a later activation deleted the earlier one's nodes while
     // its observers and React root stayed alive, so the overlay the user could see
@@ -222,6 +257,9 @@ describe('client half entry', () => {
   })
 
   it('does not invent a session id when nothing exposes one', async () => {
+    // Own precondition: earlier tests install a fake storage that would keep
+    // answering with *their* session id.
+    Object.defineProperty(window, 'localStorage', { value: undefined, configurable: true })
     const calls: string[] = []
     vi.stubGlobal('fetch', async (url: unknown) => {
       calls.push(String(url))
