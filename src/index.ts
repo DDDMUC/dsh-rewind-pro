@@ -232,7 +232,29 @@ export function apply(ctx: HostContext, injectedConfig?: unknown): void {
       config,
     })
 
-    const api = createRewindApi({ controller, config })
+    // The projection self-check decides whether a branch/"current path" feature
+    // can steer the request history. It runs on FIRST USE rather than at startup:
+    // services are still settling when entries load (the trap the capability
+    // probe fell into), and a negative reading taken too early would stick for
+    // the whole process. A failed probe leaves the caller on the always-available
+    // fork path; `null` means "still running".
+    let projectionVerdict: { registration: boolean; deletion: boolean; reason?: string } | null = null
+    let projectionStarted = false
+    const projection = (): { registration: boolean; deletion: boolean; reason?: string } | null => {
+      if (!projectionStarted) {
+        projectionStarted = true
+        void probe.adapter
+          .probeMessageProjection()
+          .then((verdict) => {
+            projectionVerdict = verdict
+            if (config.debug) log.info?.(`[rewind-pro] projection probe ${JSON.stringify(verdict)}`)
+          })
+          .catch(() => undefined)
+      }
+      return projectionVerdict
+    }
+
+    const api = createRewindApi({ controller, config, projectionVerdict: projection })
     const bound = bindSessionEvents(probe, controller, paths.workspaceRoot)
     if (config.debug && bound.length > 0) log.info?.(`[rewind-pro] events bound: ${bound.join(', ')}`)
     void migrateLegacyMarkers(config)

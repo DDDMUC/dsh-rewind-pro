@@ -19,6 +19,7 @@
 
 import type { HiddenRange, MessageLite, PluginConfig } from '../core/types.js'
 import type { SurfaceOp } from '../core/strategy-surface.js'
+import { probeMessageProjection as runProjectionProbe } from './selftest.js'
 
 /** Minimal structural view of the live harness objects we touch. */
 interface LiveSession {
@@ -64,6 +65,12 @@ export interface HarnessAdapter {
   appendSurfaceOp: (op: SurfaceOp, sessionId?: string) => Promise<boolean>
   /** Whether the reversible rewind primitive (session fork) is available. */
   canFork: () => boolean
+  /**
+   * Self-check for the message-projection route — "can a plugin decide what the
+   * model sees?". Cached: the probe builds a throwaway session, so it runs at
+   * most once per process. See host/selftest.ts.
+   */
+  probeMessageProjection: () => Promise<{ registration: boolean; deletion: boolean; reason?: string }>
   /** Stop the running turn so the tail stops growing while pending. */
   interruptTurn: () => Promise<boolean>
   setDraft: (text: string) => Promise<boolean>
@@ -148,6 +155,7 @@ export function createNullAdapter(notes: string[] = []): HarnessAdapter {
     canAppendSurfaceOp: () => false,
     appendSurfaceOp: async () => false,
     canFork: () => false,
+    probeMessageProjection: async () => ({ registration: false, deletion: false, reason: 'no sessions service' }),
     interruptTurn: async () => false,
     setDraft: async () => false,
     getDraft: () => null,
@@ -386,6 +394,8 @@ export function detectAdapter(ctx: unknown): AdapterProbe {
     return append !== undefined
   }
 
+  let projectionVerdict: Promise<{ registration: boolean; deletion: boolean; reason?: string }> | null = null
+
   const adapter: HarnessAdapter = {
     dshVersion: () => version,
     sessionId: () => latest()?.id ?? 'unknown',
@@ -418,6 +428,9 @@ export function detectAdapter(ctx: unknown): AdapterProbe {
       return surfaceFold(session, [op.range])
     },
     canFork: () => typeof safeGet(sessions, 'fork') === 'function',
+    // Cached: the probe appends to a throwaway session, and the answer cannot
+    // change within one host process.
+    probeMessageProjection: () => (projectionVerdict ??= runProjectionProbe(sessions)),
     interruptTurn: async () => false, // v1: turns are short-lived; pending masks the tail anyway
     setDraft: async () => false, // composer access is a client-half concern (slot props)
     getDraft: () => null,

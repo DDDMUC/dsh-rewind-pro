@@ -67,6 +67,13 @@ export class FakeHost implements HarnessAdapter {
   canFork(): boolean {
     return this.capabilities.canPatch
   }
+  /**
+   * The projection probe asks a question about the harness, not about a scenario:
+   * the fake reports "unsupported" so every test stays on the fork path.
+   */
+  async probeMessageProjection(): Promise<{ registration: boolean; deletion: boolean; reason?: string }> {
+    return { registration: false, deletion: false, reason: 'fake host' }
+  }
   async forkSession(boundary: number): Promise<{ ok: boolean; childId?: string; reason?: string }> {
     if (!this.capabilities.canPatch) return { ok: false, reason: 'fork-unavailable' }
     this.forks.push({ boundary })
