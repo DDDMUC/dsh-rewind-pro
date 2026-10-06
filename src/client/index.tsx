@@ -193,10 +193,21 @@ export function apply(ctx: ClientContext, injectedConfig?: Partial<PluginConfig>
   // Plugin config arrives as the second argument (the module system calls
   // `apply(ctx, config)`); there is no `ctx.config` to read.
   const config: Partial<PluginConfig> = injectedConfig ?? {}
-  const sessionId = resolveSessionId(ctx) || 'unknown'
   const text = strings(pickLanguage(resolveLanguage(ctx)))
-  const store = createRewindStore({ sessionId, clientId, transport, ...(config.apiPrefix ? { prefix: config.apiPrefix } : {}) })
-  const stash = createDraftStash(sessionId)
+  const store = createRewindStore({
+    sessionId: resolveSessionId(ctx) || 'unknown',
+    clientId,
+    transport,
+    ...(config.apiPrefix ? { prefix: config.apiPrefix } : {}),
+  })
+
+  /**
+   * Never cache the session id: the GUI switches conversations without a
+   * reload, so a value read once is the *previous* chat a moment later. Every
+   * request asks the store what it speaks for, and `followSession` keeps that
+   * answer current.
+   */
+  const sessionIdOf = (): string => store.sessionId()
 
   // Our own container, attached to a stable ancestor. We never write into a
   // React-managed node of the harness.
@@ -218,7 +229,7 @@ export function apply(ctx: ClientContext, injectedConfig?: Partial<PluginConfig>
   }
 
   const refreshImpact = async (targetSeq: number): Promise<void> => {
-    const response = await fetch(`/api/dsh-rewind-pro/plan?sessionId=${encodeURIComponent(sessionId)}&targetSeq=${targetSeq}`)
+    const response = await fetch(`/api/dsh-rewind-pro/plan?sessionId=${encodeURIComponent(sessionIdOf())}&targetSeq=${targetSeq}`)
     if (!response.ok) return
     const body = (await response.json()) as { impact?: ImpactPlan }
     state.impact = body.impact ?? null
@@ -232,21 +243,21 @@ export function apply(ctx: ClientContext, injectedConfig?: Partial<PluginConfig>
         // case this tab is the one that cancels later.
         const current = store.get()
         if (current?.pending) return
-        await postJson('/mark', { sessionId, targetSeq: action.targetSeq }, prefixOptions())
+        await postJson('/mark', { sessionId: sessionIdOf(), targetSeq: action.targetSeq }, prefixOptions())
         state.impact = null
         await store.refresh()
         render()
         break
       }
       case 'cancel':
-        await postJson('/cancel', { sessionId }, prefixOptions())
+        await postJson('/cancel', { sessionId: sessionIdOf() }, prefixOptions())
         await store.refresh()
         render()
         break
       case 'undo': {
         const response = await postJson<UndoResponse>(
           '/undo',
-          { sessionId, ...(action.opId ? { opId: action.opId } : {}), ...(action.force ? { force: true } : {}) },
+          { sessionId: sessionIdOf(), ...(action.opId ? { opId: action.opId } : {}), ...(action.force ? { force: true } : {}) },
           prefixOptions(),
         )
         // dirty: make the user confirm the divergence before we splice history.
@@ -260,7 +271,7 @@ export function apply(ctx: ClientContext, injectedConfig?: Partial<PluginConfig>
         break
       }
       case 'jump':
-        await postJson('/jump', { sessionId, toIndex: action.toIndex }, prefixOptions())
+        await postJson('/jump', { sessionId: sessionIdOf(), toIndex: action.toIndex }, prefixOptions())
         await store.refresh()
         render()
         break
@@ -289,7 +300,7 @@ export function apply(ctx: ClientContext, injectedConfig?: Partial<PluginConfig>
 
   const loadCandidates = async (): Promise<void> => {
     try {
-      const response = await transport.fetch(apiPath('/candidates', { sessionId }, config.apiPrefix))
+      const response = await transport.fetch(apiPath('/candidates', { sessionId: sessionIdOf() }, config.apiPrefix))
       if (!response.ok) return
       const body = (await response.json()) as CandidatesResponse
       if (!Array.isArray(body?.candidates)) return
