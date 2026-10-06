@@ -65,6 +65,49 @@ describe('surface fold payload', () => {
     expect('start' in (appends[0].opts.surfaceOp as object)).toBe(false)
     expect(appends[0].opts.sourceEventSeqs).toEqual([3, 4])
   })
+
+  it('appends a well-formed user message, not a bare content string', async () => {
+    // `Session.append` does not validate the payload, so a malformed one is
+    // accepted here and then reaches the model as `role: undefined` with a
+    // string where text blocks belong.
+    const appends: AppendRecord[] = []
+    const session = makeSession(appends)
+    const probe = detectAdapter({ sessions: { list: () => [session], get: () => session } })
+
+    await probe.adapter.appendSurfaceOp({ type: 'replace', range: { start: 3, end: 4 }, message: { role: 'system', text: 'hidden' } })
+
+    const data = appends[0].data as { role?: unknown; content?: unknown; source?: unknown }
+    expect(data.role).toBe('user')
+    expect(Array.isArray(data.content)).toBe(true)
+    expect(data.content).toEqual([{ type: 'text', text: expect.stringContaining('2 earlier turns hidden') as unknown as string }])
+    expect(data.source).toEqual({ kind: 'user' })
+  })
+
+  it('never rewrites node 0, which holds the system prompt', async () => {
+    // The harness rejects a replace that covers node 0 wholesale, so a fold that
+    // reached back that far would silently do nothing.
+    const appends: AppendRecord[] = []
+    const session = makeSession(appends)
+    const probe = detectAdapter({ sessions: { list: () => [session], get: () => session } })
+
+    await probe.adapter.appendSurfaceOp({ type: 'replace', range: { start: 0, end: 2 }, message: { role: 'system', text: 'hidden' } })
+
+    expect(appends[0].opts.surfaceOp).toEqual({ op: 'replace', startSeq: 1, endSeq: 2 })
+    expect(appends[0].opts.sourceEventSeqs).toEqual([1, 2])
+  })
+})
+
+describe('capability reporting', () => {
+  it('reports surface-op support even when no session is live', () => {
+    // The bug this pins: probing through a live session answered `false` on a
+    // host that accepts the append perfectly well — right after boot there is no
+    // session — and that false reading removed surface-op from the strategy
+    // ladder for the whole process.
+    const ctx = { get: () => undefined, sessions: { list: () => [], get: () => undefined } }
+    const probe = detectAdapter(ctx)
+    expect(probe.bound).toBe(true)
+    expect(probe.adapter.canAppendSurfaceOp()).toBe(true)
+  })
 })
 
 describe('service reads', () => {

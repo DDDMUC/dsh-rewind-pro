@@ -358,11 +358,31 @@ export function detectAdapter(ctx: unknown): AdapterProbe {
   const surfaceFold = async (session: LiveSession, ranges: HiddenRange[]): Promise<boolean> => {
     const range = ranges[ranges.length - 1]
     if (!range) return true
-    const hidden = range.end - range.start + 1
-    const append = safeCall<unknown>(session, 'append', 'user/message', { content: `[rewind] ${hidden} earlier turns hidden` }, {
-      surfaceOp: { op: 'replace', startSeq: range.start, endSeq: range.end },
-      sourceEventSeqs: Array.from({ length: range.end - range.start + 1 }, (_, i) => range.start + i),
-    })
+    // Node 0 holds the system prompt and the harness refuses to rewrite it
+    // ("may be rewritten only by a system/message over exactly that node"), so a
+    // fold that reached back that far would be rejected wholesale. Clamp to the
+    // first rewriteable node instead.
+    const start = Math.max(1, range.start)
+    const end = Math.max(start, range.end)
+    const hidden = end - start + 1
+    const append = safeCall<unknown>(
+      session,
+      'append',
+      'user/message',
+      // A real user message rather than a bare `{ content: '<string>' }`:
+      // `Session.append` does not validate the shape, so a malformed payload is
+      // accepted and then reaches the model as `role: undefined` with string
+      // content instead of text blocks.
+      {
+        role: 'user',
+        content: [{ type: 'text', text: `[rewind] ${String(hidden)} earlier turns hidden` }],
+        source: { kind: 'user' },
+      },
+      {
+        surfaceOp: { op: 'replace', startSeq: start, endSeq: end },
+        sourceEventSeqs: Array.from({ length: hidden }, (_, index) => start + index),
+      },
+    )
     return append !== undefined
   }
 
@@ -376,14 +396,22 @@ export function detectAdapter(ctx: unknown): AdapterProbe {
       const session = resolve(sessionId)
       return session && typeof session.seq === 'number' ? Math.max(0, session.seq - 1) : 0
     },
-    // The harness has no patchable derive surface: the reversible path is
-    // fork; the fold path is surfaceOp.replace. Report both honestly.
+    // NOTE: this flag is consumed as "the reversible derive-patch strategy is
+    // available", and the controller maps it to `adapter.canFork()` — see
+    // hooks.ts. It is NOT a claim that the harness exposes a writable derive
+    // surface; the name predates the discovery that it does
+    // (`ctx.sessions.registerMessageProjection`, still unused here). The fork is
+    // what makes a rewind reversible, so fork availability is the honest signal.
     canPatchDeriveMessages: () => false,
     patchDeriveMessages: async () => false,
-    canAppendSurfaceOp: (sessionId) => {
-      const session = resolve(sessionId)
-      return Boolean(session && typeof safeGet(session, 'append') === 'function')
-    },
+    // Capability belongs to the harness build, not to whether a chat happens to
+    // be open. Probing through a live session (`resolve(sessionId)`) answered
+    // `false` whenever none was live — which is the normal state right after
+    // boot — and that reading removed `surface-op` from the strategy ladder for
+    // the whole process even though the host accepts the append perfectly well.
+    // Whether a specific append works is decided at call time, where a real
+    // session exists and a rejection is a plain `false`.
+    canAppendSurfaceOp: () => Boolean(sessions),
     appendSurfaceOp: async (op, sessionId) => {
       const session = resolve(sessionId)
       if (!session) return false
