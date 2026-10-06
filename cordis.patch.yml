@@ -1,0 +1,32 @@
+# dsh-rewind-pro bundle patch: mounts the rewind host plugin into a dsh
+# profile composition. The plugin owns conversation rewind (pending ->
+# commit/cancel two phases, undo/history, workspace file restore) and exposes
+# an HTTP+SSE surface under /api/dsh-rewind-pro for the web client half.
+#
+# Install: `dsh plugin --profile <name> add dsh-rewind-pro` (npm or local path).
+#
+# Config defaults (all overridable per profile):
+#   strategy        auto | derive-patch | surface-op | ui-only
+#                   auto = probe the harness and pick the best reversible one.
+#   snapshot        master switch for workspace file checkpointing.
+#   trackSubagent   also capture edits made inside subagent sessions.
+#   maxAnchorGroups per-session cap on checkpoint anchor groups (prune keeps
+#                   the newest N, materializing dedup links before dropping).
+#   maxFileBytes    files above this size are never read into memory (OOM
+#                   guard); cross-volume rescue copies are bounded by it too.
+#   watchPaths      extra workspace paths to reconcile at message boundaries,
+#                   for files no write tool ever touched (default: none).
+#   rescueRetention how many recent restore-op rescue dirs to keep per session.
+#   apiPrefix       HTTP surface prefix (change for subpath deployments).
+- insert:
+    # Node-resolvable package name — must stay in sync with package.json `name`.
+    - id: rewind-pro
+      name: 'dsh-rewind-pro'
+      config:
+        strategy: auto
+        snapshot: true
+        trackSubagent: true
+        maxAnchorGroups: 100
+        maxFileBytes: 5242880
+        watchPaths: []
+        rescueRetention: 10
