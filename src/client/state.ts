@@ -32,14 +32,32 @@ export interface RewindStore {
   isPending: () => boolean
   hiddenRanges: () => HiddenRange[]
   canUndo: () => boolean
+  /**
+   * The session this store currently speaks for. Read it at call time: the GUI
+   * switches conversations without reloading the page, so a value captured at
+   * activation goes stale the moment someone clicks another chat.
+   */
+  sessionId: () => string
+  /**
+   * Re-point at another session.
+   *
+   * Without this the plugin kept answering for whatever conversation was open
+   * when the page loaded — the give-away was the dock pill reporting the same
+   * "hidden" count in every conversation, because every conversation was asking
+   * the first one's ledger.
+   *
+   * @returns whether the session actually changed.
+   */
+  setSession: (sessionId: string) => boolean
   dispose: () => void
 }
 
 const CHANNEL = 'dsh-rewind-pro'
 
 export function createRewindStore(options: StoreOptions): RewindStore {
-  const { sessionId, clientId, transport } = options
+  const { clientId, transport } = options
   const prefix = options.prefix ?? undefined
+  let sessionId = options.sessionId
 
   let current: SessionView | null = null
   const listeners = new Set<() => void>()
@@ -72,7 +90,12 @@ export function createRewindStore(options: StoreOptions): RewindStore {
     }
   }
 
+  /** Stop the streams `connect()` opened, so a session switch can re-open them. */
+  let stopStreams: (() => void) | null = null
+
   const connect = (): (() => void) => {
+    const stop = (): void => unsubscribers.splice(0).forEach((unsubscribe) => unsubscribe())
+    stopStreams = stop
     const stopEvents = transport.events(eventsPath(sessionId, prefix), (chunk) => {
       for (const message of parseSseChunk(chunk)) {
         const view = message.data as SessionView
@@ -100,7 +123,26 @@ export function createRewindStore(options: StoreOptions): RewindStore {
     }
 
     void refresh()
-    return () => unsubscribers.splice(0).forEach((stop) => stop())
+    return stop
+  }
+
+  /**
+   * Re-point at another session: everything this store holds is per-session
+   * (the view, the ledger it mirrors, the SSE stream and the channel), so the
+   * old state is dropped rather than merged, and the stream is re-opened on the
+   * new id.
+   */
+  const setSession = (next: string): boolean => {
+    if (next === sessionId) return false
+    sessionId = next
+    current = null
+    const wasStreaming = stopStreams !== null
+    stopStreams?.()
+    stopStreams = null
+    notify()
+    if (wasStreaming) connect()
+    else void refresh()
+    return true
   }
 
   return {
@@ -112,6 +154,8 @@ export function createRewindStore(options: StoreOptions): RewindStore {
     applyRemote,
     refresh,
     connect,
+    sessionId: () => sessionId,
+    setSession,
     isPending: () => Boolean(current?.pending),
     hiddenRanges: () => current?.ranges ?? [],
     canUndo: () => {

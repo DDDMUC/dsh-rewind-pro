@@ -11,6 +11,15 @@ import type { HiddenRange, HistoryEntry, LedgerOp, PendingState, ReplayResult } 
 export interface ReplayDetail extends ReplayResult {
   /** Op ids of commits still in effect, oldest first. */
   activeCommitIds: string[]
+  /**
+   * Hidden range of each commit seen so far, by op id.
+   *
+   * Needed because the surface is a *union*: once two commits' ranges merge,
+   * the merged range equals neither of them, so an undo cannot be expressed as
+   * a set difference against the surface. Removing by identity and rebuilding
+   * the union is the only way to give the earlier rewind's turns back.
+   */
+  rangesById: Map<string, HiddenRange>
 }
 
 const sameRange = (a: HiddenRange, b: HiddenRange): boolean => a.start === b.start && a.end === b.end
@@ -39,6 +48,17 @@ function replayPrefix(ops: readonly LedgerOp[], limit: number): ReplayDetail {
   let pending: PendingState | null = null
   let history: HistoryEntry[] = []
   let activeCommitIds: string[] = []
+  const rangesById = new Map<string, HiddenRange>()
+
+  /** Rebuild the hidden surface from the commits that are still in effect. */
+  const rebuild = (): void => {
+    const live: HiddenRange[] = []
+    for (const id of activeCommitIds) {
+      const range = rangesById.get(id)
+      if (range) live.push(range)
+    }
+    ranges = mergeRanges(live)
+  }
 
   for (let i = 0; i < limit; i++) {
     const op = ops[i]
@@ -60,8 +80,9 @@ function replayPrefix(ops: readonly LedgerOp[], limit: number): ReplayDetail {
 
       case 'commit': {
         if (pending?.opId === op.refOpId) {
-          ranges = mergeRanges([...ranges, op.range])
+          rangesById.set(op.opId, op.range)
           activeCommitIds = [...activeCommitIds, op.opId]
+          rebuild()
           pending = null
         }
         history.push({
@@ -77,8 +98,12 @@ function replayPrefix(ops: readonly LedgerOp[], limit: number): ReplayDetail {
       case 'unwind': {
         const target = ops.find((candidate) => isCommit(candidate) && candidate.opId === op.refOpId)
         if (target && isCommit(target)) {
-          ranges = ranges.filter((range) => !sameRange(range, target.range))
+          // Remove by identity, then rebuild: a set difference against the merged
+          // surface silently does nothing when another commit's range absorbed
+          // this one, which reported a successful undo while the turns stayed
+          // hidden.
           activeCommitIds = activeCommitIds.filter((id) => id !== target.opId)
+          rebuild()
         }
         history.push({
           opId: op.opId,
@@ -98,13 +123,15 @@ function replayPrefix(ops: readonly LedgerOp[], limit: number): ReplayDetail {
         ranges = rewound.ranges
         pending = rewound.pending
         activeCommitIds = rewound.activeCommitIds
+        rangesById.clear()
+        for (const [id, range] of rewound.rangesById) rangesById.set(id, range)
         history = [...rewound.history, { opId: op.opId, kind: 'jump', targetSeq: null, time: op.time, reversible: true }]
         break
       }
     }
   }
 
-  return { ranges, pending, history, activeCommitIds }
+  return { ranges, pending, history, activeCommitIds, rangesById }
 }
 
 export function replayDetail(ops: readonly LedgerOp[]): ReplayDetail {
