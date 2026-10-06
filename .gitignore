@@ -1,0 +1,7 @@
+node_modules/
+lib/
+.codebuddy/
+*.log
+*.txt
+Thumbs.db
+.DS_Store

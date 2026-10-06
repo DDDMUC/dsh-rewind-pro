@@ -1,0 +1,202 @@
+// Host controller: the two-phase rewind state machine.
+//
+// mark -> pending (tail masked, target text in the draft, old draft stashed)
+// send -> commit (main path: pre-step; fallback: session event)
+// ✕    -> cancel (mask removed, draft restored)
+// plus graded undo and history jump.
+
+import { mkdtemp } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { afterAll, beforeEach, describe, expect, it } from 'vitest'
+import { createRewindController } from '../../src/host/hooks'
+import { DEFAULT_CONFIG } from '../../src/core/types'
+import { cleanupTmp, writeFile as putFile } from './helpers/tmp'
+import { conversation, FakeHost } from './helpers/fake-host'
+
+afterAll(cleanupTmp)
+
+const dirs: string[] = []
+const freshDir = async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'rewind-ctrl-'))
+  dirs.push(dir)
+  return dir
+}
+
+let host: FakeHost
+let controller: ReturnType<typeof createRewindController>
+
+beforeEach(async () => {
+  host = new FakeHost({ messages: conversation() })
+  controller = createRewindController({
+    adapter: host,
+    ledgerDir: await freshDir(),
+    snapshotRoot: await freshDir(),
+    workspaceRoot: await freshDir(),
+    config: { ...DEFAULT_CONFIG },
+    now: () => 1000,
+  })
+})
+
+describe('mark (phase one)', () => {
+  it('stashes the draft and fills the target text without mutating the session', async () => {
+    await host.setDraft('half-typed thought')
+    const result = await controller.mark({ sessionId: 'session-1', targetSeq: 3 })
+
+    expect(result.ok).toBe(true)
+    // Fork strategy: the session itself is never touched while pending —
+    // the fork at commit time is what makes undo trivially possible.
+    expect(host.forks).toEqual([])
+    expect(host.draft).toBe('now add tests')
+    expect(controller.stashedDraft('session-1')).toBe('half-typed thought')
+    expect(controller.state('session-1').pending?.targetSeq).toBe(3)
+    // Interrupting the running turn is what makes the tail stop growing.
+    expect(host.interrupts).toBe(1)
+  })
+
+  it('refuses a target that is not in the session', async () => {
+    const result = await controller.mark({ sessionId: 'session-1', targetSeq: 99 })
+    expect(result).toMatchObject({ ok: false })
+    expect(host.deriveRanges).toEqual([])
+  })
+})
+
+describe('cancel', () => {
+  it('puts the stashed draft back without touching the session', async () => {
+    await host.setDraft('half-typed thought')
+    await controller.mark({ sessionId: 'session-1', targetSeq: 3 })
+
+    const result = await controller.cancel({ sessionId: 'session-1' })
+
+    expect(result.ok).toBe(true)
+    expect(host.forks).toEqual([])
+    expect(host.draft).toBe('half-typed thought')
+    expect(controller.state('session-1').pending).toBeNull()
+  })
+
+  it('is a no-op when nothing is pending', async () => {
+    expect((await controller.cancel({ sessionId: 'session-1' })).ok).toBe(false)
+  })
+})
+
+describe('commit (phase two)', () => {
+  it('commits on the pre-step path by forking at the boundary', async () => {
+    await controller.mark({ sessionId: 'session-1', targetSeq: 3 })
+    const result = await controller.handleBeforeStep({ sessionId: 'session-1', text: 'now add tests' })
+
+    expect(result.committed).toBe(true)
+    // targetSeq 3 => the child keeps seqs 1..2 (boundary is inclusive).
+    expect(host.forks).toEqual([{ boundary: 2 }])
+    expect(host.followed[0]).toBe('session-1-child-1')
+    const state = controller.state('session-1')
+    expect(state.pending).toBeNull()
+    expect(state.ranges).toEqual([{ start: 3, end: 4 }])
+  })
+
+  it('falls back to a session event when pre-step never fires', async () => {
+    await controller.mark({ sessionId: 'session-1', targetSeq: 3 })
+    host.messages = [...host.messages, { seq: 5, role: 'user', text: 'now add tests' }]
+
+    const result = await controller.handleSessionEvent({
+      sessionId: 'session-1',
+      type: 'message',
+      payload: { seq: 5, role: 'user', text: 'now add tests' },
+    })
+
+    expect(result.committed).toBe(true)
+    expect(controller.state('session-1').ranges).toEqual([{ start: 3, end: 5 }])
+  })
+
+  it('does not commit twice when both paths fire', async () => {
+    await controller.mark({ sessionId: 'session-1', targetSeq: 3 })
+    await controller.handleBeforeStep({ sessionId: 'session-1', text: 'now add tests' })
+    host.messages = [...host.messages, { seq: 5, role: 'user', text: 'now add tests' }]
+    await controller.handleSessionEvent({ sessionId: 'session-1', type: 'message', payload: { seq: 5 } })
+
+    expect(controller.state('session-1').ranges).toEqual([{ start: 3, end: 4 }])
+    expect(host.forks).toHaveLength(1)
+  })
+
+  it('refuses to commit when the session epoch moved on', async () => {
+    await controller.mark({ sessionId: 'session-1', targetSeq: 3 })
+    host.epochValue = 'epoch-2'
+
+    const result = await controller.handleBeforeStep({ sessionId: 'session-1', text: 'now add tests' })
+    expect(result).toMatchObject({ committed: false, reason: 'stale-epoch' })
+  })
+})
+
+describe('undo', () => {
+  const committed = async () => {
+    await controller.mark({ sessionId: 'session-1', targetSeq: 3 })
+    await controller.handleBeforeStep({ sessionId: 'session-1', text: 'now add tests' })
+  }
+
+  it('follows the client back to the parent on a clean undo', async () => {
+    await committed()
+    expect(host.followed).toEqual(['session-1-child-1'])
+
+    const result = await controller.undo({ sessionId: 'session-1' })
+
+    expect(result.grade).toBe('clean')
+    // The parent log was never touched; undo is just following back.
+    expect(host.followed).toEqual(['session-1-child-1', 'session-1'])
+    expect(controller.state('session-1').ranges).toEqual([])
+  })
+
+  it('asks for confirmation when turns were written after the rewind', async () => {
+    await committed()
+    host.messages = [...host.messages, { seq: 5, role: 'user', text: 'and one more thing' }]
+
+    const asked = await controller.undo({ sessionId: 'session-1' })
+    expect(asked.grade).toBe('dirty')
+    expect(asked.applied).toBe(false)
+    expect(host.followed).toHaveLength(1)
+
+    const forced = await controller.undo({ sessionId: 'session-1', force: true })
+    expect(forced.applied).toBe(true)
+    expect(host.followed).toEqual(['session-1-child-1', 'session-1'])
+  })
+
+  it('refuses an irreversible rewind and says why', async () => {
+    const surfaceOnly = new FakeHost({ messages: conversation(), canPatch: false, canSurface: true })
+    const ctrl = createRewindController({
+      adapter: surfaceOnly,
+      ledgerDir: await freshDir(),
+      snapshotRoot: await freshDir(),
+      workspaceRoot: await freshDir(),
+      config: { ...DEFAULT_CONFIG },
+      now: () => 1000,
+    })
+    await ctrl.mark({ sessionId: 'session-1', targetSeq: 3 })
+    await ctrl.handleBeforeStep({ sessionId: 'session-1', text: 'now add tests' })
+
+    const result = await ctrl.undo({ sessionId: 'session-1', force: true })
+    expect(result.grade).toBe('irreversible')
+    expect(result.applied).toBe(false)
+    expect(result.reason).toBeTruthy()
+  })
+})
+
+describe('history jump', () => {
+  it('re-applies an earlier ledger state without losing the log', async () => {
+    await controller.mark({ sessionId: 'session-1', targetSeq: 3 })
+    await controller.handleBeforeStep({ sessionId: 'session-1', text: 'now add tests' })
+    await controller.undo({ sessionId: 'session-1' })
+
+    const result = await controller.jump({ sessionId: 'session-1', toIndex: 1 })
+    expect(result.ok).toBe(true)
+    expect(controller.state('session-1').ranges).toEqual([{ start: 3, end: 4 }])
+    expect(controller.state('session-1').history.length).toBeGreaterThan(2)
+  })
+})
+
+describe('write hook', () => {
+  it('backs a file up before the write lands', async () => {
+    const abs = await putFile(controller.workspaceRoot, 'src/parser.ts', 'v1')
+
+    await controller.handleBeforeWrite({ sessionId: 'session-1', absPath: abs, turnSeq: 4 })
+    const anchor = await controller.snapshotAnchor('session-1', 'turn-4')
+    expect(anchor?.files.map((f) => f.path)).toEqual(['src/parser.ts'])
+  })
+})
