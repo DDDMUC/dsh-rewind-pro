@@ -37,6 +37,11 @@ export interface RewindApi {
 export interface ApiDeps {
   controller: RewindController
   config: PluginConfig
+  /**
+   * Last known message-projection self-check verdict, or null while the probe is
+   * still running (see host/selftest.ts).
+   */
+  projectionVerdict?: () => { registration: boolean; deletion: boolean; reason?: string } | null
 }
 
 const json = (status: number, body: unknown): ApiResponse => ({ status, body })
@@ -87,7 +92,7 @@ export function createRewindApi(deps: ApiDeps): RewindApi {
 
     switch (`${request.method} ${rest}`) {
       case 'GET /health':
-        return json(200, { ok: true, capability: controller.capability() })
+        return json(200, { ok: true, capability: controller.capability(), projection: deps.projectionVerdict?.() ?? null })
 
       case 'GET /state':
         return json(200, controller.state(sid))
