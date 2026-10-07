@@ -25,7 +25,22 @@ import {
 const PAGER_CLASS = 'dsh-rewind-pro-pager'
 const ACTION_HOST_MARKER = 'dshet-action-host'
 
-const DEFAULT_USER_SELECTORS = ['[data-chat-flow-kind="user"]', '[data-message-role="user"]', '[data-role="user"]', '.dsw-message-user']
+// 用户消息在真实 DOM 里的稳定标识是 node/flow key 里的 `input-message`
+// （实测：<section data-turn-trigger="true"> + <div data-chat-node-key="13:input-message<uuid>">），
+// **不是** data-chat-flow-kind="user" —— 本版宿主的 kind 只有
+// assistant-step / tool-call / turn-process / turn-tail / turn-trigger / context。
+// 旧写法留在后面兜底，别的构建可能不同。
+const DEFAULT_USER_SELECTORS = [
+  // 只留被实测证实的两个：一条消息在 DOM 里是"外层 flow div + 内层 section"，
+  // 而 data-turn-trigger / flow-kind="turn-trigger" 还会命中**另一个兄弟元素**，
+  // 结果同一条消息被算成两轮、翻页器注入两份（实测 PAGERS=10 / 5 条消息）。
+  '[data-chat-flow-key*="input-message"]',
+  '[data-chat-node-key*="input-message"]',
+  '[data-chat-flow-kind="user"]',
+  '[data-message-role="user"]',
+  '[data-role="user"]',
+  '.dsw-message-user',
+]
 const DEFAULT_ASSISTANT_SELECTORS = ['[data-chat-flow-kind="assistant-step"]', '[data-message-role="assistant"]', '[data-role="assistant"]']
 
 export interface BranchPagerOptions {
@@ -62,7 +77,10 @@ const textOf = (element: HTMLElement, selector: string): string => {
 
 /** 一行里最后一个"只有图标"的按钮，就是我们插控件的位置（与 ↶ 按钮同一套技法）。 */
 function actionHost(row: HTMLElement): HTMLElement {
-  const existing = row.querySelector<HTMLElement>(`.${ACTION_HOST_MARKER}`)
+  // 排除我们自己的翻页器：它也带着 ACTION_HOST_MARKER（为了让别的插件的行处理
+  // 放它一马），如果把它当成宿主，下一次刷新就会在它内部再插一个 —— 实测表现
+  // 就是同一条消息里出现两份 "输入 1/1"。
+  const existing = row.querySelector<HTMLElement>(`.${ACTION_HOST_MARKER}:not(.${PAGER_CLASS})`)
   if (existing) return existing
   const icons = Array.from(row.querySelectorAll('button')).filter(
     (button) => button.textContent !== null && button.textContent.trim().length === 0,
@@ -72,9 +90,20 @@ function actionHost(row: HTMLElement): HTMLElement {
   return row
 }
 
+/**
+ * 只保留**最外层**的匹配元素。
+ *
+ * 一条消息在真实 DOM 里是嵌套的几层（外层 flow div 带 data-chat-node-key，
+ * 里面还有 <section data-turn-trigger>），多个选择器会同时命中它们 —— 那样
+ * 同一条消息会被当成好几轮，翻页器也会重复注入。按"谁包含谁"去重即可。
+ */
+function outermost(elements: HTMLElement[]): HTMLElement[] {
+  return elements.filter((element) => !elements.some((other) => other !== element && other.contains(element)))
+}
+
 function collect(root: ParentNode, userSelectors: string[], assistantSelectors: string[]): Rows {
-  const users = Array.from(root.querySelectorAll<HTMLElement>(userSelectors.join(',')))
-  const assistantsAll = Array.from(root.querySelectorAll<HTMLElement>(assistantSelectors.join(',')))
+  const users = outermost(Array.from(root.querySelectorAll<HTMLElement>(userSelectors.join(','))))
+  const assistantsAll = outermost(Array.from(root.querySelectorAll<HTMLElement>(assistantSelectors.join(','))))
   const order = Array.from(root.querySelectorAll<HTMLElement>([...userSelectors, ...assistantSelectors].join(',')))
   const assistants: HTMLElement[][] = users.map(() => [])
   let current = -1
@@ -181,7 +210,8 @@ export function mountBranchPager(options: BranchPagerOptions): BranchPagerHandle
     rows.users.forEach((row, index) => {
       const node = nodes[index]
       const host = actionHost(row)
-      let pager = host.querySelector<HTMLElement>(`:scope > .${PAGER_CLASS}`)
+      // 在整个行里找（而不是 :scope > ），宿主位置随刷新漂移时也不会重复注入
+      let pager = row.querySelector<HTMLElement>(`.${PAGER_CLASS}`)
       if (!pager) {
         pager = doc.createElement('span')
         pager.className = `${PAGER_CLASS} ${ACTION_HOST_MARKER}`
@@ -222,9 +252,31 @@ export function mountBranchPager(options: BranchPagerOptions): BranchPagerHandle
     })
   }
 
+  /**
+   * 选择器与本版 DOM 不匹配时**必须看得见**。
+   *
+   * 之前这类问题表现为"界面上什么都没有"，而页面上又没有任何提示，只能靠
+   * 一点一点猜 —— 这条自检把它变成一眼可见的红字。
+   */
+  const updateWarn = (rows: Rows): void => {
+    const existing = doc.querySelector('[data-rewind-pro-warn]')
+    const hasFlow = doc.querySelectorAll('[data-chat-flow-key]').length > 0
+    if (rows.users.length > 0 || !hasFlow) {
+      existing?.remove()
+      return
+    }
+    if (existing) return
+    const warn = doc.createElement('div')
+    warn.setAttribute('data-rewind-pro-warn', '1')
+    warn.textContent = '版本树：未匹配到消息行（选择器与本版 DSH 不匹配）'
+    warn.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:9999;padding:6px 10px;border-radius:6px;font-size:12px;background:rgba(200,40,40,.92);color:#fff'
+    doc.body.append(warn)
+  }
+
   const refresh = (): void => {
     if (disposed) return
     const rows = collect(doc.body, userSelectors, assistantSelectors)
+    updateWarn(rows)
     if (rows.users.length === 0) return
     load()
     // 刚从存储恢复时，把当前 DOM 里的行全部当作基线（它们属于历史，不是新消息）
