@@ -1,7 +1,7 @@
 {
   "name": "dsh-rewind-pro",
   "version": "0.2.1",
-  "description": "DeepSeek Harness conversation rewind, fully reversible: cancellable two-phase rewind (pending -> commit/cancel), undo any rewind with history jump, Claude-Code-style workspace file restore, capability probing with graceful degradation. Rewind that never traps you.",
+  "description": "DeepSeek Harness conversation rewind with a version tree: edit a prompt or re-run a reply to grow a new branch, page between input and reply versions with n/N pagers, and every old branch stays put. Plus a cancellable two-phase rewind (pending -> commit/cancel), undo with history jump, and workspace file restore. Rewind that never traps you.",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
