@@ -23,6 +23,7 @@ import {
   type Conversation,
   type Turn,
 } from '../core/branch.js'
+import { bridgeForeignEditor, hasForeignEditAction, hasForeignPlugin, openOwnEditor } from './inline-edit.js'
 
 const PAGER_CLASS = 'dsh-rewind-pro-pager'
 const ACTION_HOST_MARKER = 'dshet-action-host'
@@ -342,14 +343,29 @@ export function mountBranchPager(options: BranchPagerOptions): BranchPagerHandle
       }
       if (replyStepper) pager.append(replyStepper)
 
+      const foreignEdit = hasForeignEditAction(row)
+      const editButton = action(doc, '编辑', () => {
+        // 它的插件在场时**绝不开我自己的编辑器**：它的 clearEditor() 会按类名把
+        // 页面上任何 .dshet-editor 删掉（源码实测如此），我的编辑器会被无声吞掉。
+        // 那种情况下我的功能走它的编辑器页脚（见 bridgeForeignEditor）。
+        if (hasForeignPlugin(doc)) return
+        openOwnEditor({
+          doc,
+          row,
+          text: node.input.text,
+          submitLabel: '分页重跑',
+          cancelLabel: '取消',
+          onSubmit: (text) => {
+            if (text === node.input.text) return
+            branchFrom(row, text)
+          },
+        })
+      })
+      // 它那支笔在场时我让位：一行动作只留一支笔，我的功能改由它的编辑器页脚承载。
+      if (foreignEdit) editButton.style.display = 'none'
+
       pager.append(
-        action(doc, '编辑', () => {
-          const text = askText(node.input.text)
-          if (text === null || text === node.input.text) return
-          model = commitUserEdit(model, turnId, text)
-          save()
-          refresh()
-        }),
+        editButton,
         action(doc, '重跑', () => {
           model = rerunReply(model, turnId, '')
           save()
@@ -401,6 +417,33 @@ export function mountBranchPager(options: BranchPagerOptions): BranchPagerHandle
     })
   }
 
+  /**
+   * 我的主行动作「分页重跑」：以**编辑后的文本**开一个新输入版本，并给它一个新
+   * 回复版本（新枝在这里长出来，旧后缀原样保留）。
+   *
+   * 它同时被两个入口调用：我自己编辑器里的主按钮，以及**它的**编辑器页脚里
+   * 我插进去的那个按钮 —— 两条路必须是同一件事，否则"两个都装"时行为会不一致。
+   */
+  const branchFrom = (row: HTMLElement, text: string): void => {
+    const turnId = boundFor(row)
+    if (!turnId) return
+    model = commitUserEdit(model, turnId, text)
+    model = rerunReply(model, turnId, '')
+    save()
+    refresh()
+  }
+
+  // 它（dsh-edit-turn）在场时，我的「分页重跑」接进**它的**编辑器页脚：
+  // 一行动作只留一支笔，而功能由它的页脚承载（[取消][分页重跑][保存]）。
+  const bridge = bridgeForeignEditor({
+    doc,
+    label: '分页重跑',
+    rowSelectors: userSelectors,
+    onAction: (row, text) => {
+      branchFrom(row, text)
+    },
+  })
+
   const observer = new MutationObserver(schedule)
   observer.observe(doc.body, { childList: true, subtree: true })
   refresh()
@@ -411,6 +454,7 @@ export function mountBranchPager(options: BranchPagerOptions): BranchPagerHandle
       disposed = true
       if (frame) (doc.defaultView ?? window).cancelAnimationFrame(frame)
       observer.disconnect()
+      bridge.dispose()
       for (const node of Array.from(doc.querySelectorAll(`.${PAGER_CLASS}`))) node.remove()
     },
   }
@@ -467,15 +511,27 @@ function stepper(
  * 两个原因，都是踩过的：
  *   1. 按钮是 18px 见方的图标位，中文塞进去必然被挤成竖排（第一版就是这样）；
  *   2. `✎` / `⟳` 这类字形依赖字体，缺字时渲染成豆腐块 —— SVG 不依赖字体。
- * 文字留在 `title` / `aria-label` 里，可读性与可访问性都不丢。
+ *
+ * **笔的路径与 dsh-edit-turn 逐字一致**（同样三条 path、同样 16×16 viewBox、
+ * 同样 stroke-width 1.2、同样 round 端点）：用户要求"笔做成和它一样的"，
+ * 而"一样"最可靠的做法就是抄它的几何，而不是我自己画一支像的。
+ * 抄自 dsh-edit-turn `ICON_PATHS` + `ICON_MARKUP`。
  */
+const EDIT_TURN_ICON_PATHS = ['M11.2 2.4l2.4 2.4', 'M3.1 10.5l7.1-7.1 2.4 2.4-7.1 7.1-3.1.7z', 'M2.6 13.6h10.8']
+const PENCIL_MARKUP =
+  '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">' +
+  EDIT_TURN_ICON_PATHS.map(
+    (d) => `<path d="${d}" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>`,
+  ).join('') +
+  '</svg>'
+
 function action(doc: Document, label: '编辑' | '重跑', onPick: () => void): HTMLElement {
   const button = doc.createElement('button')
   button.type = 'button'
   button.className = `dsh-rewind-pro-btn ${PAGER_CLASS}-btn`
   button.innerHTML =
     label === '编辑'
-      ? '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M11.2 2.6l2.2 2.2L6.1 12.1 3.4 12.9l.8-2.7z"/></svg>'
+      ? PENCIL_MARKUP
       : '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13.2 8.6A5.2 5.2 0 1 1 11.3 4"/><path d="M13.4 2.4v2.8h-2.8"/></svg>'
   button.title = label === '编辑' ? '以这条为起点开一个新输入版本' : '给这条回复再生成一个版本（新分支）'
   button.setAttribute('aria-label', label)

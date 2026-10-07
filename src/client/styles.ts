@@ -84,6 +84,14 @@ export const CSS = `
 }
 /* 图标按钮比 ↶ 再小一号，四个挤在一行也不至于抢戏 */
 .dsh-rewind-pro-pager-btn { width: 18px; height: 18px; border-radius: 5px; }
+/* 笔要和 dsh-edit-turn 的行动作看起来一致：它是 28×28、圆角 28、内边距 6。
+   单独把"编辑"那支放大到同尺寸，两支笔并排时（过渡期）不会一大一小。 */
+.dsh-rewind-pro-pager-btn[aria-label='编辑'] {
+  width: 28px;
+  height: 28px;
+  border-radius: 28px;
+  padding: 6px;
+}
 
 .dsh-rewind-pro-pill,
 .dsh-rewind-pro-banner,
