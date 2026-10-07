@@ -367,17 +367,21 @@ function stepper(
 }
 
 /**
- * 行动作：**图标**而不是中文。
+ * 行动作：**内联 SVG 图标**，不是文字也不是 Unicode 字形。
  *
- * 按钮是 22px（现在 18px）见方的图标位，中文塞进去必然被挤成竖排 —— 这正是
- * 第一版"编辑/重跑"在界面上断开成两行的原因。文字留在 `title` / `aria-label`
- * 里，可读性不丢。
+ * 两个原因，都是踩过的：
+ *   1. 按钮是 18px 见方的图标位，中文塞进去必然被挤成竖排（第一版就是这样）；
+ *   2. `✎` / `⟳` 这类字形依赖字体，缺字时渲染成豆腐块 —— SVG 不依赖字体。
+ * 文字留在 `title` / `aria-label` 里，可读性与可访问性都不丢。
  */
 function action(doc: Document, label: '编辑' | '重跑', onPick: () => void): HTMLElement {
   const button = doc.createElement('button')
   button.type = 'button'
   button.className = `dsh-rewind-pro-btn ${PAGER_CLASS}-btn`
-  button.textContent = label === '编辑' ? '✎' : '⟳'
+  button.innerHTML =
+    label === '编辑'
+      ? '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M11.2 2.6l2.2 2.2L6.1 12.1 3.4 12.9l.8-2.7z"/></svg>'
+      : '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13.2 8.6A5.2 5.2 0 1 1 11.3 4"/><path d="M13.4 2.4v2.8h-2.8"/></svg>'
   button.title = label === '编辑' ? '以这条为起点开一个新输入版本' : '给这条回复再生成一个版本（新分支）'
   button.setAttribute('aria-label', label)
   button.addEventListener('click', (event) => {
