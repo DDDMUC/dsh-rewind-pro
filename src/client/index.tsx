@@ -11,6 +11,7 @@ import { createRewindStore } from './state.js'
 import { createDraftStash } from './draft-stash.js'
 import { ensureStyles } from './styles.js'
 import { pickLanguage, strings } from './locales.js'
+import { mountBranchPager, type BranchPagerHandle } from './branch-pager.js'
 import { mountRewindButtons, type RewindButtonLayerHandle } from './rewind-button.js'
 import { IconRewind } from './icons.js'
 import { PendingBanner } from './banner.js'
@@ -297,6 +298,8 @@ export function apply(ctx: ClientContext, injectedConfig?: Partial<PluginConfig>
   // also when new user turns can appear.
   let candidates: RewindCandidate[] = []
   let buttons: RewindButtonLayerHandle | null = null
+  /** 版本树翻页器（输入/回复各自翻页；切版本靠行可见性）。 */
+  let pager: BranchPagerHandle | null = null
 
   const loadCandidates = async (): Promise<void> => {
     try {
@@ -306,6 +309,7 @@ export function apply(ctx: ClientContext, injectedConfig?: Partial<PluginConfig>
       if (!Array.isArray(body?.candidates)) return
       candidates = body.candidates
       buttons?.refresh()
+    pager?.refresh()
     } catch {
       /* offline: keep the last known candidates */
     }
@@ -370,8 +374,13 @@ export function apply(ctx: ClientContext, injectedConfig?: Partial<PluginConfig>
     label: text.rewindShort,
   })
 
+  // 版本树：每一轮两个翻页器（输入版本 / 回复版本）+ 编辑 / 重跑。
+  pager = mountBranchPager({ sessionId: sessionIdOf })
+
+
   const dispose = (): void => {
     if (sessionFrame) cancelAnimationFrame(sessionFrame)
+    pager?.dispose()
     sessionObserver.disconnect()
     unsubscribe()
     stopEvents()
