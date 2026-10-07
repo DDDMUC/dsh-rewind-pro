@@ -59,6 +59,60 @@ describe('版本树翻页器', () => {
       .querySelector(`.dsh-rewind-pro-pager-stepper[title^="${label}版本"] .dsh-rewind-pro-pager-count`)
       ?.textContent?.trim() ?? null
 
+  /** 走我的行内编辑器：点笔 → 填文本 → 点【分页重跑】。 */
+  const editVia = (row: HTMLElement, text: string): void => {
+    buttonByTitle(row, '以这条为起点开一个新输入版本')?.click()
+    const editor = document.querySelector<HTMLElement>('.dshet-editor')
+    expect(editor).not.toBeNull()
+    const area = editor?.querySelector('textarea')
+    if (area) area.value = text
+    const submit = Array.from(editor?.querySelectorAll('button') ?? []).find(
+      (candidate) => (candidate.textContent ?? '').trim() === '分页重跑',
+    )
+    ;(submit as HTMLButtonElement | undefined)?.click()
+  }
+
+  const footerLabels = (editor: HTMLElement | null): string[] =>
+    Array.from(editor?.querySelectorAll('.dshet-footer button') ?? []).map(
+      (button) => (button.textContent ?? '').trim(),
+    )
+
+  /** 造一个"它在场"的环境：行里有它的笔，还有一个它的编辑器（页脚 [取消][保存]）。 */
+  const withForeignEditor = (): void => {
+    const row = userRows()[0]
+    const foreign = document.createElement('button')
+    foreign.type = 'button'
+    foreign.className = 'dshet-action dshet-row-action'
+    foreign.setAttribute('aria-label', '编辑这条消息')
+    row.append(foreign)
+
+    const layer = document.createElement('div')
+    layer.className = 'dshet-layer'
+    const editor = document.createElement('div')
+    editor.className = 'dshet-editor'
+    editor.setAttribute('data-dshet-editor', '1')
+    const rect = row.getBoundingClientRect()
+    editor.style.left = `${String(Math.round(rect.left))}px`
+    editor.style.top = `${String(Math.round(rect.bottom + 6))}px`
+    editor.style.width = `${String(Math.round(rect.width))}px`
+    editor.innerHTML = '<textarea></textarea><div class="dshet-footer"></div>'
+    const footer = editor.querySelector('.dshet-footer')
+    const cancel = document.createElement('button')
+    cancel.type = 'button'
+    cancel.className = 'dshet-btn'
+    cancel.textContent = '取消'
+    cancel.addEventListener('click', () => {
+      layer.remove()
+    })
+    const save = document.createElement('button')
+    save.type = 'button'
+    save.className = 'dshet-btn dshet-btn-primary'
+    save.textContent = '保存'
+    footer?.append(cancel, save)
+    layer.append(editor)
+    document.body.append(layer)
+  }
+
   it('把控件注入到每一个用户行里', () => {
     mount()
     for (const row of userRows()) expect(pagerIn(row)).not.toBeNull()
@@ -71,9 +125,9 @@ describe('版本树翻页器', () => {
   })
 
   it('编辑开新输入版本：新输入没有回复，后缀行消失；翻回去它们回来', () => {
-    const pager = mount(() => '甲问改')
+    const pager = mount()
 
-    buttonByTitle(userRows()[0], '以这条为起点开一个新输入版本')?.click()
+    editVia(userRows()[0], '甲问改')
     pager.refresh()
 
     // 新输入版本成为当前 → 输入 2/2，且第二轮整条隐藏
@@ -168,8 +222,8 @@ describe('版本树翻页器', () => {
   })
 
   it('模型按会话存进 storage，重新挂载后仍是分支状态', () => {
-    const pager = mount(() => '甲问改')
-    buttonByTitle(userRows()[0], '以这条为起点开一个新输入版本')?.click()
+    const pager = mount()
+    editVia(userRows()[0], '甲问改')
     pager.refresh()
     pager.dispose()
     handle = null
@@ -179,6 +233,77 @@ describe('版本树翻页器', () => {
     again.refresh()
     expect(countIn(userRows()[0], '输入')).toBe('2/2')
     expect(visible(userRows()[1])).toBe(false)
+  })
+
+  it('只装我：页脚是 [取消][分页重跑]，取消不动模型', () => {
+    const pager = mount()
+    buttonByTitle(userRows()[0], '以这条为起点开一个新输入版本')?.click()
+
+    const editor = document.querySelector<HTMLElement>('.dshet-editor')
+    expect(editor).not.toBeNull()
+    expect(editor?.hasAttribute('data-rewind-pro-editor')).toBe(true)
+    expect(footerLabels(editor)).toEqual(['取消', '分页重跑'])
+
+    // 取消：关掉编辑器，模型一个版本都不许多
+    const cancel = Array.from(editor?.querySelectorAll('button') ?? []).find(
+      (candidate) => (candidate.textContent ?? '').trim() === '取消',
+    )
+    ;(cancel as HTMLButtonElement | undefined)?.click()
+    expect(document.querySelector('.dshet-editor')).toBeNull()
+    pager.refresh()
+    expect(countIn(userRows()[0], '输入')).toBeNull()
+  })
+
+  it('两个都装：一支笔；我的按钮插在它的保存左侧', async () => {
+    const pager = mount()
+    withForeignEditor()
+    pager.refresh()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    // 一行动作只显示一支笔：我的那支让位，它那支在场
+    const mine = userRows()[0].querySelector<HTMLElement>('button[aria-label="编辑"]')
+    expect(mine?.style.display).toBe('none')
+    const visiblePencils = Array.from(
+      userRows()[0].querySelectorAll<HTMLElement>('button[aria-label="编辑"], button[aria-label="编辑这条消息"]'),
+    ).filter((button) => button.style.display !== 'none')
+    expect(visiblePencils).toHaveLength(1)
+
+    // 它加载时我绝不打开自己的编辑器：它的 clearEditor() 按类名全页删除
+    expect(document.querySelector('[data-rewind-pro-editor]')).toBeNull()
+    ;(mine as HTMLButtonElement | null)?.click()
+    expect(document.querySelector('[data-rewind-pro-editor]')).toBeNull()
+
+    // 它的页脚变成 [取消][分页重跑][保存]
+    const foreign = document.querySelector<HTMLElement>('.dshet-editor')
+    expect(footerLabels(foreign)).toEqual(['取消', '分页重跑', '保存'])
+
+    // 我的按钮干我的事：开新输入版本；它的编辑器用"它的取消"关闭
+    const bridge = foreign?.querySelector<HTMLButtonElement>('.dsh-rewind-pro-bridge-action')
+    const area = foreign?.querySelector('textarea')
+    if (area) area.value = '甲问改'
+    bridge?.click()
+    pager.refresh()
+
+    expect(countIn(userRows()[0], '输入')).toBe('2/2')
+    expect(document.querySelector('.dshet-editor')).toBeNull()
+  })
+
+  it('我不在场时不动它的页脚（并对已插入的按钮做清理）', async () => {
+    const pager = mount()
+    withForeignEditor()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    // 我在场 → 插进去了；dispose 必须把它拔掉
+    expect(document.querySelector('.dsh-rewind-pro-bridge-action')).not.toBeNull()
+    pager.dispose()
+    handle = null
+    expect(document.querySelector('.dsh-rewind-pro-bridge-action')).toBeNull()
+
+    // 之后再出现的编辑器（"只装它"的情形）我也不该碰
+    document.querySelector('.dshet-layer')?.remove()
+    withForeignEditor()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const foreign = document.querySelector<HTMLElement>('.dshet-editor')
+    expect(footerLabels(foreign)).toEqual(['取消', '保存'])
   })
 
   it('dispose 后控件被移除', () => {
