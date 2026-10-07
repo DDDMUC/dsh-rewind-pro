@@ -5,6 +5,7 @@
 import type { CommandSpec, HarnessAdapter } from '../../../src/host/adapter'
 import type { HiddenRange, MessageLite } from '../../../src/core/types'
 import type { SurfaceOp } from '../../../src/core/strategy-surface'
+import type { ShadowPlan } from '../../../src/core/surface-window'
 
 export interface FakeHostOptions {
   messages?: MessageLite[]
@@ -98,6 +99,36 @@ export class FakeHost implements HarnessAdapter {
     this.surfaceOps = [...this.surfaceOps, op]
     return true
   }
+  /** 记录"分页重跑"两步，供控制器/路由测试断言（顺序与参数都要能验）。 */
+  shadows: { sessionId?: string; plan: ShadowPlan; expectedSeq?: number }[] = []
+  prompts: { sessionId: string; text: string }[] = []
+  /** 规划结果；默认给一个可用的窗口，测试可以改成失败来验"什么都不做"。 */
+  planVerdict: { ok: true; plan: ShadowPlan; expectedSeq?: number } | { ok: false; reason: string } | null = null
+  planShadowFor(
+    targetSeq: number,
+    _sessionId?: string,
+  ): { ok: true; plan: ShadowPlan; expectedSeq?: number } | { ok: false; reason: string } {
+    if (this.planVerdict) return this.planVerdict
+    return {
+      ok: true,
+      plan: { startSeq: targetSeq, endSeq: targetSeq + 1, shadowed: [targetSeq, targetSeq + 1], turn: 2 },
+      expectedSeq: 5,
+    }
+  }
+  async shadowWindow(
+    sessionId: string | undefined,
+    plan: ShadowPlan,
+    expectedSeq?: number,
+  ): Promise<{ ok: boolean; reason?: string }> {
+    this.shadows.push({ sessionId, plan, expectedSeq })
+    return this.shadowVerdict
+  }
+  shadowVerdict: { ok: boolean; reason?: string } = { ok: true }
+  async promptSession(sessionId: string, text: string): Promise<{ ok: boolean; reason?: string }> {
+    this.prompts.push({ sessionId, text })
+    return this.promptVerdict
+  }
+  promptVerdict: { ok: boolean; reason?: string } = { ok: true }
   async interruptTurn(): Promise<boolean> {
     this.interrupts++
     return true

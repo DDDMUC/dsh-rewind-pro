@@ -38,6 +38,69 @@ beforeEach(async () => {
   })
 })
 
+describe('applyBranch（分页重跑：先遮蔽，再重跑）', () => {
+  it('顺序必须是先遮蔽再重跑 —— 反过来历史里会有两份提示词', async () => {
+    const calls: string[] = []
+    host.shadows.length = 0
+    host.prompts.length = 0
+    host.shadowWindow = async (sessionId, plan, expectedSeq) => {
+      calls.push('shadow')
+      host.shadows.push({ sessionId, plan, expectedSeq })
+      return { ok: true }
+    }
+    host.promptSession = async (sessionId, text) => {
+      calls.push('prompt')
+      host.prompts.push({ sessionId, text })
+      return { ok: true }
+    }
+
+    const result = await controller.applyBranch({ sessionId: 'session-1', targetSeq: 3, text: '改写后的提示词' })
+
+    expect(result.ok).toBe(true)
+    expect(calls).toEqual(['shadow', 'prompt'])
+    expect(host.shadows[0]?.plan.shadowed.length).toBeGreaterThan(0)
+    expect(host.prompts[0]).toEqual({ sessionId: 'session-1', text: '改写后的提示词' })
+  })
+
+  it('目标不是 surface 节点时什么都不做（不写日志、不重跑）', async () => {
+    host.planVerdict = { ok: false, reason: 'seq 9 is not a surface node' }
+    host.shadows.length = 0
+    host.prompts.length = 0
+
+    const result = await controller.applyBranch({ sessionId: 'session-1', targetSeq: 9, text: 'x' })
+
+    expect(result.ok).toBe(false)
+    expect(result.reason).toContain('not a surface node')
+    expect(host.shadows).toHaveLength(0)
+    expect(host.prompts).toHaveLength(0)
+  })
+
+  it('遮蔽失败就绝不重跑（否则等于往没遮蔽的历史里再塞一条提示词）', async () => {
+    host.shadowVerdict = { ok: false, reason: 'stale: expected seq 5, found 7' }
+    host.shadows.length = 0
+    host.prompts.length = 0
+
+    const result = await controller.applyBranch({ sessionId: 'session-1', targetSeq: 3, text: 'x' })
+
+    expect(result.ok).toBe(false)
+    expect(result.reason).toContain('stale')
+    expect(host.prompts).toHaveLength(0)
+  })
+
+  it('重跑被拒时如实报告（遮蔽已经落地，这一点必须说清）', async () => {
+    host.promptVerdict = { ok: false, reason: 'sessionController.prompt unavailable' }
+    host.shadows.length = 0
+    host.prompts.length = 0
+
+    const result = await controller.applyBranch({ sessionId: 'session-1', targetSeq: 3, text: 'x' })
+
+    expect(result.ok).toBe(false)
+    expect(result.reason).toContain('sessionController')
+    expect(host.shadows).toHaveLength(1)
+    expect(result.shadowed).toBe(true)
+  })
+})
+
 describe('mark (phase one)', () => {
   it('stashes the draft and fills the target text without mutating the session', async () => {
     await host.setDraft('half-typed thought')

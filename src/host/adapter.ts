@@ -17,9 +17,18 @@
 //   * `ctx.get(name, false)` reads a service WITHOUT the inject requirement;
 //     prefer it for optional services so the module inject list stays minimal.
 
+import { randomUUID } from 'node:crypto'
 import type { HiddenRange, MessageLite, PluginConfig } from '../core/types.js'
 import type { SurfaceOp } from '../core/strategy-surface.js'
+import type { ShadowPlan, SurfaceEventLike } from '../core/surface-window.js'
+import { planShadow } from '../core/surface-window.js'
 import { probeMessageProjection as runProjectionProbe } from './selftest.js'
+
+/** 插件身份：写进替身事件的 source，便于事后辨认日志里是谁写的。 */
+const PLUGIN_ID = 'dsh-rewind-pro'
+
+/** 可能承载 surfaceOp 的四种事件类型（DSH 的 surface 契约）。 */
+const SURFACE_TYPES = new Set(['system/message', 'user/message', 'assistant/message', 'tool/result'])
 
 /** Minimal structural view of the live harness objects we touch. */
 interface LiveSession {
@@ -63,6 +72,37 @@ export interface HarnessAdapter {
   patchDeriveMessages: (ranges: HiddenRange[]) => Promise<boolean>
   canAppendSurfaceOp: (sessionId?: string) => boolean
   appendSurfaceOp: (op: SurfaceOp, sessionId?: string) => Promise<boolean>
+  /**
+   * 遮蔽一个 surface 窗口（追加式日志的唯一改法：写一个带 replace 的替身事件）。
+   *
+   * 写入序列抄自 `dsh-rerun-turn` 的 `buildShadowWrites`：合成一个记账回合
+   * （turn/start → step/start → 替身 → step/end → turn/end），替身是**空内容的
+   * system/message**。刻意不用可见的 user 消息当替身：提示词随后要由
+   * `promptSession` 重新送进去，否则界面上会出现两条提示词。
+   *
+   * `expectedSeq` 是规划时看到的日志长度；不符就整体拒绝（半截写入会留下悬空回合）。
+   */
+  shadowWindow: (
+    sessionId: string | undefined,
+    plan: ShadowPlan,
+    expectedSeq?: number,
+  ) => Promise<{ ok: boolean; reason?: string }>
+  /**
+   * 读会话日志并规划遮蔽窗口（原始事件不出适配器）。
+   *
+   * `expectedSeq` 是规划时看到的日志长度，交给写入端做乐观并发保护。
+   */
+  planShadowFor: (
+    targetSeq: number,
+    sessionId?: string,
+  ) => ({ ok: true; plan: ShadowPlan; expectedSeq?: number } | { ok: false; reason: string })
+  /**
+   * 真的让模型重新生成：`sessionController.prompt`。
+   *
+   * 它会**追加一条新的用户消息**并触发一次生成；调用方负责先把旧窗口遮蔽掉，
+   * 否则历史里会有两份提示词。
+   */
+  promptSession: (sessionId: string, text: string) => Promise<{ ok: boolean; reason?: string }>
   /** Whether the reversible rewind primitive (session fork) is available. */
   canFork: () => boolean
   /**
@@ -138,6 +178,20 @@ function safeCall<R>(holder: unknown, key: string, ...args: unknown[]): R | unde
 }
 
 /**
+ * `safeCall` 的异步版：`prompt` 是 Promise，同步的 safeCall 会把它当成功，
+ * 于是"调用抛错"和"调用成功"分不出来 —— 重跑必须能如实报告失败原因。
+ */
+async function safeCallAsync<R>(holder: unknown, key: string, ...args: unknown[]): Promise<R | undefined> {
+  const fn = safeGet<(...a: unknown[]) => Promise<R>>(holder, key)
+  if (typeof fn !== 'function') return undefined
+  try {
+    return await fn.apply(holder, args)
+  } catch {
+    return undefined
+  }
+}
+
+/**
  * Safe adapter used when nothing harness-shaped can be found (headless runs,
  * unknown DSH build). Everything reports "unsupported" so the plugin degrades
  * to ui-only instead of throwing into the host.
@@ -154,6 +208,9 @@ export function createNullAdapter(notes: string[] = []): HarnessAdapter {
     patchDeriveMessages: async () => false,
     canAppendSurfaceOp: () => false,
     appendSurfaceOp: async () => false,
+    shadowWindow: async () => ({ ok: false, reason: 'sessions service unavailable' }),
+    planShadowFor: () => ({ ok: false, reason: 'sessions service unavailable' }),
+    promptSession: async () => ({ ok: false, reason: 'sessionController service unavailable' }),
     canFork: () => false,
     probeMessageProjection: async () => ({ registration: false, deletion: false, reason: 'no sessions service' }),
     interruptTurn: async () => false,
@@ -396,6 +453,103 @@ export function detectAdapter(ctx: unknown): AdapterProbe {
 
   let projectionVerdict: Promise<{ registration: boolean; deletion: boolean; reason?: string }> | null = null
 
+  /**
+   * 遮蔽窗口：合成一个记账回合 + 一个空内容的 system 替身，替身带 replace。
+   *
+   * 顺序照 `dsh-rerun-turn`：turn/start → step/start → 替身 → step/end → turn/end。
+   * 回合号必须接在日志已有的最大值之后（`plan.turn` 由 foldSurface 算好）。
+   */
+  const shadowWindow = async (
+    sessionId: string | undefined,
+    plan: ShadowPlan,
+    expectedSeq?: number,
+  ): Promise<{ ok: boolean; reason?: string }> => {
+    const session = resolve(sessionId)
+    if (!session) return { ok: false, reason: 'no live session' }
+    const observed = typeof session.seq === 'number' ? session.seq : undefined
+    if (typeof expectedSeq === 'number' && observed !== expectedSeq) {
+      return { ok: false, reason: `stale: expected seq ${String(expectedSeq)}, found ${String(observed)}` }
+    }
+
+    const carrier = {
+      turn: plan.turn,
+      step: 1,
+      message: {
+        id: randomUUID(),
+        role: 'system',
+        content: [] as unknown[],
+        source: { kind: 'system-prompt', plugin: PLUGIN_ID, carrierFor: 'surface-shadow' },
+      },
+    }
+    const writes: { type: string; data: unknown; opts?: Record<string, unknown> }[] = [
+      { type: 'turn/start', data: { turn: plan.turn } },
+      { type: 'step/start', data: { turn: plan.turn, step: 1 } },
+      {
+        type: 'system/message',
+        data: carrier,
+        opts: {
+          surfaceOp: { op: 'replace', startSeq: plan.startSeq, endSeq: plan.endSeq },
+          sourceEventSeqs: [...plan.shadowed],
+        },
+      },
+      { type: 'step/end', data: { turn: plan.turn, step: 1 } },
+      { type: 'turn/end', data: { turn: plan.turn, reason: { kind: 'completed' } } },
+    ]
+
+    for (const write of writes) {
+      const args: unknown[] = write.opts ? [write.opts] : []
+      const landed = safeCall<unknown>(session, 'append', write.type, write.data, ...args)
+      if (landed === undefined) {
+        return { ok: false, reason: `append ${write.type} failed` }
+      }
+    }
+    return { ok: true }
+  }
+
+  /**
+   * 读日志、规划遮蔽窗口。
+   *
+   * 两种日志形态都要能吃下：正常情况 surface 事件带 `surfaceOp:'append'`（替身带
+   * `{op:'replace',…}`）；但整份日志一个 `surfaceOp` 都没有时，如果只认标记，
+   * 窗口会算成空 → 用户看到的是"点了没反应"。那种日志按事件类型兜底识别 surface
+   * 节点。只在**完全没有标记**时兜底，避免把已被遮蔽的节点又算回来。
+   */
+  const planShadowFor = (
+    targetSeq: number,
+    sessionId?: string,
+  ): { ok: true; plan: ShadowPlan; expectedSeq?: number } | { ok: false; reason: string } => {
+    const session = resolve(sessionId)
+    if (!session) return { ok: false, reason: 'no live session' }
+    const events = safeCall<SurfaceEventLike[]>(session, 'snapshotEvents') ?? []
+    const marked = events.some((event) => event.surfaceOp !== undefined)
+    const normalized = marked
+      ? events
+      : events.map((event) =>
+          SURFACE_TYPES.has(event.type) ? { ...event, surfaceOp: 'append' as const } : event,
+        )
+    const planned = planShadow(normalized, targetSeq)
+    if (!planned.ok) return planned
+    const expectedSeq = typeof session.seq === 'number' ? session.seq : undefined
+    return { ok: true, plan: planned.plan, expectedSeq }
+  }
+
+  /** 真的重跑：让 controller 用新文本触发一次生成。 */
+  const promptSession = async (sessionId: string, text: string): Promise<{ ok: boolean; reason?: string }> => {
+    const controller = safeGet<{ prompt?: (...args: unknown[]) => unknown }>(ctx, 'sessionController')
+    if (!controller || typeof controller.prompt !== 'function') {
+      return { ok: false, reason: 'sessionController.prompt unavailable' }
+    }
+    const request = {
+      requestId: randomUUID(),
+      sessionId,
+      mode: 'queue',
+      content: [{ type: 'text', text }],
+    }
+    const value = await safeCallAsync<{ accepted?: unknown }>(controller, 'prompt', request, new AbortController().signal)
+    if (value === undefined) return { ok: false, reason: 'prompt rejected' }
+    return { ok: true }
+  }
+
   const adapter: HarnessAdapter = {
     dshVersion: () => version,
     sessionId: () => latest()?.id ?? 'unknown',
@@ -422,6 +576,9 @@ export function detectAdapter(ctx: unknown): AdapterProbe {
     // Whether a specific append works is decided at call time, where a real
     // session exists and a rejection is a plain `false`.
     canAppendSurfaceOp: () => Boolean(sessions),
+    shadowWindow,
+    planShadowFor,
+    promptSession,
     appendSurfaceOp: async (op, sessionId) => {
       const session = resolve(sessionId)
       if (!session) return false

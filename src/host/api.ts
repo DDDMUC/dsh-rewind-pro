@@ -127,6 +127,24 @@ export function createRewindApi(deps: ApiDeps): RewindApi {
         return result.ok ? json(200, controller.state(sid)) : json(409, { error: result.reason })
       }
 
+      /**
+       * 分页重跑：真的遮蔽 + 真的重跑。
+       *
+       * 返回体里带上 `shadowed`：遮蔽已经落地而重跑被拒时，调用方必须知道
+       * "日志已经变了"，否则它会以为整件事都没发生。
+       */
+      case 'POST /branch/apply': {
+        const targetSeq = Number(body.targetSeq)
+        if (!Number.isFinite(targetSeq)) return json(400, { error: 'bad-target' })
+        const text = typeof body.text === 'string' ? body.text : ''
+        if (text.trim() === '') return json(400, { error: 'bad-text' })
+        const result = await controller.applyBranch({ sessionId: sid, targetSeq, text })
+        publish(sid)
+        return result.ok
+          ? json(200, { ok: true, shadowed: true, shadowedSeqs: result.shadowedSeqs ?? [] })
+          : json(409, { error: result.reason, shadowed: result.shadowed === true })
+      }
+
       case 'POST /undo': {
         const result = await controller.undo({
           sessionId: sid,

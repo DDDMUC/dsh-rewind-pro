@@ -54,6 +54,61 @@ describe('routing', () => {
   })
 })
 
+describe('POST /branch/apply（分页重跑）', () => {
+  it('遮蔽之后用改写后的文本重新提示，两步都落到适配器上', async () => {
+    const res = await call('POST', '/api/dsh-rewind-pro/branch/apply', {
+      sessionId: 'session-1',
+      targetSeq: 3,
+      text: '改写后的提示词',
+    })
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ ok: true, shadowed: true })
+    expect(host.prompts).toEqual([{ sessionId: 'session-1', text: '改写后的提示词' }])
+    expect(host.shadows).toHaveLength(1)
+  })
+
+  it('空文本被拒 —— 绝不能把空提示词送进模型', async () => {
+    const res = await call('POST', '/api/dsh-rewind-pro/branch/apply', {
+      sessionId: 'session-1',
+      targetSeq: 3,
+      text: '   ',
+    })
+
+    expect(res.status).toBe(400)
+    expect(host.prompts).toHaveLength(0)
+    expect(host.shadows).toHaveLength(0)
+  })
+
+  it('重跑被拒时返回 shadowed:true —— 日志确实已经变了，调用方必须知道', async () => {
+    host.promptVerdict = { ok: false, reason: 'sessionController.prompt unavailable' }
+
+    const res = await call('POST', '/api/dsh-rewind-pro/branch/apply', {
+      sessionId: 'session-1',
+      targetSeq: 3,
+      text: '改写后的提示词',
+    })
+
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ shadowed: true, error: expect.stringContaining('sessionController') as unknown as string })
+  })
+
+  it('规划不出来时不动日志，也不重跑', async () => {
+    host.planVerdict = { ok: false, reason: 'seq 9 is not a surface node' }
+
+    const res = await call('POST', '/api/dsh-rewind-pro/branch/apply', {
+      sessionId: 'session-1',
+      targetSeq: 9,
+      text: '改写后的提示词',
+    })
+
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ shadowed: false })
+    expect(host.shadows).toHaveLength(0)
+    expect(host.prompts).toHaveLength(0)
+  })
+})
+
 describe('state', () => {
   it('reports pending, ranges, history and capability', async () => {
     const res = await call('POST', '/api/dsh-rewind-pro/mark', { sessionId: 'session-1', targetSeq: 3 })
