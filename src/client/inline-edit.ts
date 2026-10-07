@@ -20,6 +20,8 @@ const FIELD_CLASS = 'dshet-field'
 const FOOTER_CLASS = 'dshet-footer'
 const BTN_CLASS = 'dshet-btn'
 const BTN_PRIMARY_CLASS = 'dshet-btn dshet-btn-primary'
+/** 它的类名表里本来就有 error/note，失败原因直接用它的样式。 */
+const ERROR_CLASS = 'dshet-error'
 
 /** 我的按钮在它页脚里的标记，避免重复插入。 */
 export const BRIDGE_MARKER = 'dsh-rewind-pro-bridge-action'
@@ -113,6 +115,11 @@ export function rowOfEditor(editor: HTMLElement, rows: readonly HTMLElement[]): 
   return null
 }
 
+export interface EditorVerdict {
+  ok: boolean
+  reason?: string
+}
+
 export interface OwnEditorOptions {
   doc: Document
   row: HTMLElement
@@ -121,7 +128,7 @@ export interface OwnEditorOptions {
   submitLabel: string
   /** 取消按钮文案；默认取本地化里的 `editor.cancel`，取不到就用"取消"。 */
   cancelLabel?: string
-  onSubmit: (text: string) => void
+  onSubmit: (text: string) => EditorVerdict | Promise<EditorVerdict> | undefined
 }
 
 export interface OwnEditorHandle {
@@ -169,10 +176,26 @@ export function openOwnEditor(options: OwnEditorOptions): OwnEditorHandle {
   submit.type = 'button'
   submit.className = BTN_PRIMARY_CLASS
   submit.textContent = options.submitLabel
+  // 失败就**不关**编辑器，把原因留在原地：关掉又什么都没发生，用户只会以为坏了。
+  const showError = (reason: string): void => {
+    let notice = editor.querySelector<HTMLElement>(`.${ERROR_CLASS}`)
+    if (!notice) {
+      notice = doc.createElement('div')
+      notice.className = ERROR_CLASS
+      editor.insertBefore(notice, footer)
+    }
+    notice.textContent = reason
+  }
   submit.addEventListener('click', () => {
     const text = area.value
-    handle.close()
-    options.onSubmit(text)
+    void (async () => {
+      const verdict = await options.onSubmit(text)
+      if (verdict && !verdict.ok) {
+        showError(verdict.reason ?? '这次分页重跑没有成功。')
+        return
+      }
+      handle.close()
+    })()
   })
 
   footer.append(cancel, submit)
@@ -207,7 +230,7 @@ export interface BridgeOptions {
   /** 页脚里我的按钮叫什么。 */
   label: string
   /** 编辑器所属的行（几何反解），以及编辑器里的当前文本。 */
-  onAction: (row: HTMLElement, text: string) => void
+  onAction: (row: HTMLElement, text: string) => EditorVerdict | Promise<EditorVerdict> | undefined
   /** 用于反解行的行选择器（与翻页器保持一致）。 */
   rowSelectors: string[]
 }
@@ -243,12 +266,25 @@ export function bridgeForeignEditor(options: BridgeOptions): { refresh: () => vo
         const row = rowOfEditor(editor, rows)
         const area = editor.querySelector('textarea')
         const text = area instanceof HTMLTextAreaElement ? area.value : ''
-        // 先"用它的取消"关掉编辑器：这是它自己的关闭路径，不会触发它的保存
-        const cancel = Array.from(footer.querySelectorAll('button')).find(
-          (candidate) => (candidate.textContent ?? '').trim() === '取消',
-        )
-        cancel?.click()
-        if (row) options.onAction(row, text)
+        void (async () => {
+          const verdict = row ? await options.onAction(row, text) : { ok: false, reason: '定位不到这条消息所在的行。' }
+          if (verdict && !verdict.ok) {
+            // 失败时不关它的编辑器：把它自己的取消按钮留着，原因显示在页脚上方
+            let notice = editor.querySelector<HTMLElement>(`.${ERROR_CLASS}`)
+            if (!notice) {
+              notice = doc.createElement('div')
+              notice.className = ERROR_CLASS
+              editor.insertBefore(notice, footer)
+            }
+            notice.textContent = verdict.reason ?? '这次分页重跑没有成功。'
+            return
+          }
+          // 成功才关闭，并且走**它自己的取消**（它的关闭路径，不会触发它的保存）
+          const cancel = Array.from(footer.querySelectorAll('button')).find(
+            (candidate) => (candidate.textContent ?? '').trim() === '取消',
+          )
+          cancel?.click()
+        })()
       })
 
       // 插到它的主按钮（保存）**左边**：用户要求 [取消][分页重跑][保存]

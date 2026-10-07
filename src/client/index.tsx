@@ -11,7 +11,9 @@ import { createRewindStore } from './state.js'
 import { createDraftStash } from './draft-stash.js'
 import { ensureStyles } from './styles.js'
 import { pickLanguage, strings } from './locales.js'
-import { mountBranchPager, type BranchPagerHandle } from './branch-pager.js'
+import { DEFAULT_USER_SELECTORS, mountBranchPager, type BranchPagerHandle } from './branch-pager.js'
+import { resolveAnchorSeqs } from './anchors.js'
+import { findAnchors } from './rewind-button.js'
 import { mountRewindButtons, type RewindButtonLayerHandle } from './rewind-button.js'
 import { IconRewind } from './icons.js'
 import { PendingBanner } from './banner.js'
@@ -375,7 +377,32 @@ export function apply(ctx: ClientContext, injectedConfig?: Partial<PluginConfig>
   })
 
   // 版本树：每一轮两个翻页器（输入版本 / 回复版本）+ 编辑 / 重跑。
-  pager = mountBranchPager({ sessionId: sessionIdOf })
+  //
+  // 「分页重跑」真的动会话：先把这一行定位成日志里的 seq（复用回退按钮那套
+  // DOM × 候选文本的配对；拿不准就是 null —— 猜 seq 会把遮蔽写到别的消息上），
+  // 再让宿主**改提示词并重跑**。宿主失败时把原因原样带回去显示。
+  pager = mountBranchPager({
+    sessionId: sessionIdOf,
+    seqOfRow: (row) => {
+      const found = findAnchors(document, DEFAULT_USER_SELECTORS)
+      const seqs = resolveAnchorSeqs(found, candidates)
+      const index = found.findIndex((anchor) => anchor.element === row)
+      return index >= 0 ? (seqs[index] ?? null) : null
+    },
+    applyBranch: async ({ seq, text }) => {
+      const result = await postJson<{ error?: string }>(
+        '/branch/apply',
+        { sessionId: sessionIdOf(), targetSeq: seq, text },
+        config.apiPrefix ? { prefix: config.apiPrefix } : {},
+      )
+      if (result.ok) return { ok: true }
+      const reason =
+        typeof result.data?.error === 'string'
+          ? result.data.error
+          : `宿主拒绝了这次分页重跑（HTTP ${String(result.status)}）。`
+      return { ok: false, reason }
+    },
+  })
 
 
   const dispose = (): void => {
