@@ -99,6 +99,14 @@ export function mountBranchPager(options: BranchPagerOptions): BranchPagerHandle
 
   let model: Conversation = emptyConversation()
   let frame = 0
+  /**
+   * 已经当作基线吸收过的用户行数（-1 = 刚加载，尚未与 DOM 对账）。
+   *
+   * 这是翻页与 DOM 的关键解耦：DOM 里永远躺着**完整**的线性历史，而我们只
+   * 隐藏不在分支上的行。若每次 refresh 都按 DOM 重建模型，编辑/重跑刚开出的
+   * 新分支会被那些仍然存在的旧行立刻拼回去 —— 后缀就永远藏不住了。
+   */
+  let absorbed = -1
   let disposed = false
 
   const key = (): string => `dsh-rewind-pro.branch.${options.sessionId()}`
@@ -107,8 +115,10 @@ export function mountBranchPager(options: BranchPagerOptions): BranchPagerHandle
     try {
       const raw = storage?.getItem(key()) ?? null
       model = raw ? deserializeConversation(JSON.parse(raw)) : emptyConversation()
+      absorbed = -1
     } catch {
       model = emptyConversation()
+      absorbed = -1
     }
   }
 
@@ -122,7 +132,7 @@ export function mountBranchPager(options: BranchPagerOptions): BranchPagerHandle
 
   /** 把 DOM 里新出现的用户行补进模型（模型只增不改，旧枝永不丢）。 */
   const absorbRows = (rows: Rows): void => {
-    for (let index = 0; index < rows.users.length; index++) {
+    for (let index = Math.max(0, absorbed); index < rows.users.length; index++) {
       const nodes = branchPath(model)
       if (index < nodes.length) {
         // 已有这一轮：正文或回复文本变了就更新（不改版本数）
@@ -209,7 +219,12 @@ export function mountBranchPager(options: BranchPagerOptions): BranchPagerHandle
     const rows = collect(doc.body, userSelectors, assistantSelectors)
     if (rows.users.length === 0) return
     load()
+    // 刚从存储恢复时，把当前 DOM 里的行全部当作基线（它们属于历史，不是新消息）
+    // 模型里还没有任何轮 → DOM 就是基线，全部吸收；
+    // 模型非空（刚从 storage 恢复）→ 现有行属于历史，只吸收超出的新行。
+    if (absorbed < 0) absorbed = model.root ? rows.users.length : 0
     absorbRows(rows)
+    absorbed = rows.users.length
     renderControls(rows)
     applyVisibility(rows)
   }
