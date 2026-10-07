@@ -77,6 +77,18 @@ export interface RewindController {
   candidates: (sessionId: string) => RewindCandidate[]
   impact: (sessionId: string, targetSeq: number) => ImpactPlan | null
   mark: (input: { sessionId: string; targetSeq: number }) => Promise<ActionResult>
+  /**
+   * 「分页重跑」：把目标消息之后的内容从模型上下文里遮蔽掉，然后用改写后的文本
+   * **真的**重新提示一次（模型会重新生成）。
+   *
+   * 两步顺序不可颠倒：先遮蔽再重跑，历史里才会只有一条提示词。反过来会把新
+   * 提示词追加到还没遮蔽的旧历史后面，模型会看到两份。
+   */
+  applyBranch: (input: {
+    sessionId: string
+    targetSeq: number
+    text: string
+  }) => Promise<{ ok: boolean; reason?: string; shadowed?: boolean; shadowedSeqs?: number[] }>
   cancel: (input: { sessionId: string }) => Promise<ActionResult>
   commit: (input: { sessionId: string }) => Promise<ActionResult>
   undo: (input: { sessionId: string; opId?: string; force?: boolean }) => Promise<UndoResult>
@@ -261,6 +273,34 @@ export function createRewindController(deps: ControllerDeps): RewindController {
     impact: (sessionId, targetSeq) => {
       if (!messageAt(targetSeq, sessionId)) return null
       return planRewind(adapter.messagesOf(sessionId), targetSeq)
+    },
+
+    /**
+     * 分页重跑：**先遮蔽、再重跑**。
+     *
+     * 每一步都有明确的前置：规划不出来就什么都不做；遮蔽失败就绝不重跑
+     * （否则等于往一份没遮蔽的历史里再塞一条提示词，模型会看到两份）。
+     * 遮蔽成功而重跑被拒时，`shadowed: true` 如实说明日志已经变了。
+     */
+    async applyBranch({ sessionId, targetSeq, text }) {
+      const planned = adapter.planShadowFor(targetSeq, sessionId)
+      if (!planned.ok) return { ok: false, reason: planned.reason, shadowed: false }
+
+      const shadow = await adapter.shadowWindow(sessionId, planned.plan, planned.expectedSeq)
+      if (!shadow.ok) {
+        return { ok: false, reason: shadow.reason ?? 'shadow-failed', shadowed: false }
+      }
+
+      const prompted = await adapter.promptSession(sessionId, text)
+      if (!prompted.ok) {
+        return {
+          ok: false,
+          reason: prompted.reason ?? 'prompt-failed',
+          shadowed: true,
+          shadowedSeqs: planned.plan.shadowed,
+        }
+      }
+      return { ok: true, shadowed: true, shadowedSeqs: planned.plan.shadowed }
     },
 
     async mark({ sessionId, targetSeq }) {
