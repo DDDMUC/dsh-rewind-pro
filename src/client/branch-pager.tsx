@@ -94,7 +94,15 @@ export function mountBranchPager(options: BranchPagerOptions): BranchPagerHandle
   const storage = options.storage === undefined ? safeStorage() : options.storage
   const userSelectors = options.selectors ?? DEFAULT_USER_SELECTORS
   const assistantSelectors = options.assistantSelectors ?? DEFAULT_ASSISTANT_SELECTORS
-  const readText = options.readText ?? ((row: HTMLElement) => textOf(row, '.dsh-rewind-pro-text, [data-message-text], .dsw-message-text'))
+  // 正文取法有两层：先找专用的文本节点（准确），找不到就退回整行文本并去掉
+  // 我们注入的控件。真实 DOM 里承载文本的 class 名没有公开约定，兜底能保证
+  // "编辑"至少带着原话打开，而不是空白。
+  const readText =
+    options.readText ??
+    ((row: HTMLElement) => {
+      const dedicated = textOf(row, '.dsh-rewind-pro-text, [data-message-text], .dsw-message-text')
+      return dedicated.length > 0 ? dedicated : textOf(row, '*')
+    })
   const askText = options.askText ?? ((current: string) => doc.defaultView?.prompt?.('编辑这条消息', current) ?? null)
 
   let model: Conversation = emptyConversation()
