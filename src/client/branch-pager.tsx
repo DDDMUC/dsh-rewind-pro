@@ -33,7 +33,7 @@ const ACTION_HOST_MARKER = 'dshet-action-host'
 // **不是** data-chat-flow-kind="user" —— 本版宿主的 kind 只有
 // assistant-step / tool-call / turn-process / turn-tail / turn-trigger / context。
 // 旧写法留在后面兜底，别的构建可能不同。
-const DEFAULT_USER_SELECTORS = [
+export const DEFAULT_USER_SELECTORS = [
   // 只留被实测证实的两个：一条消息在 DOM 里是"外层 flow div + 内层 section"，
   // 而 data-turn-trigger / flow-kind="turn-trigger" 还会命中**另一个兄弟元素**，
   // 结果同一条消息被算成两轮、翻页器注入两份（实测 PAGERS=10 / 5 条消息）。
@@ -57,6 +57,10 @@ export interface BranchPagerOptions {
   readText?: (row: HTMLElement) => string
   /** 编辑时向用户要新文本；默认用 prompt，测试里可注入。 */
   askText?: (current: string) => string | null
+  /** 把一行定位到会话日志里的 seq；拿不准就返回 null（猜 seq 会改错消息）。 */
+  seqOfRow?: (row: HTMLElement) => number | null
+  /** 真的改提示词 + 真的重跑（走宿主路由）。不提供就退回纯本地分页。 */
+  applyBranch?: (input: { seq: number; text: string }) => Promise<{ ok: boolean; reason?: string }>
 }
 
 export interface BranchPagerHandle {
@@ -355,10 +359,7 @@ export function mountBranchPager(options: BranchPagerOptions): BranchPagerHandle
           text: node.input.text,
           submitLabel: '分页重跑',
           cancelLabel: '取消',
-          onSubmit: (text) => {
-            if (text === node.input.text) return
-            branchFrom(row, text)
-          },
+          onSubmit: (text) => realBranch(row, node.turn.id, text),
         })
       })
       // 它那支笔在场时我让位：一行动作只留一支笔，我的功能改由它的编辑器页脚承载。
@@ -433,6 +434,37 @@ export function mountBranchPager(options: BranchPagerOptions): BranchPagerHandle
     refresh()
   }
 
+  /**
+   * 真的动手：先让宿主改提示词并重跑，**成功之后**才更新我自己的模型。
+   *
+   * 三条纪律，都是为了避免"看起来成功了其实什么都没发生"：
+   *   * 定位不到 seq 就拒绝（猜 seq 会把遮蔽写到别的消息上，那是破坏性的）；
+   *   * 宿主失败就把原因原样报回去，本地模型一个版本都不许动；
+   *   * 没接宿主通道时才退回纯本地分页（老行为）。
+   */
+  const realBranch = async (
+    row: HTMLElement,
+    turnId: string,
+    text: string,
+  ): Promise<{ ok: boolean; reason?: string }> => {
+    const branch = options.applyBranch
+    const seqOf = options.seqOfRow
+    if (!branch || !seqOf) {
+      branchFrom(row, text)
+      return { ok: true }
+    }
+    const seq = seqOf(row)
+    if (seq === null) {
+      return { ok: false, reason: '定位不到这条消息在会话日志里的位置，已取消（没有做任何改动）。' }
+    }
+    const result = await branch({ seq, text })
+    if (!result.ok) return { ok: false, reason: result.reason ?? '宿主拒绝了这次分页重跑。' }
+    model = commitUserEdit(model, turnId, text)
+    save()
+    refresh()
+    return { ok: true }
+  }
+
   // 它（dsh-edit-turn）在场时，我的「分页重跑」接进**它的**编辑器页脚：
   // 一行动作只留一支笔，而功能由它的页脚承载（[取消][分页重跑][保存]）。
   const bridge = bridgeForeignEditor({
@@ -440,7 +472,9 @@ export function mountBranchPager(options: BranchPagerOptions): BranchPagerHandle
     label: '分页重跑',
     rowSelectors: userSelectors,
     onAction: (row, text) => {
-      branchFrom(row, text)
+      const turnId = boundFor(row)
+      if (!turnId) return { ok: false, reason: '这一行还没进我的版本树，先翻一次页再试。' }
+      return realBranch(row, turnId, text)
     },
   })
 

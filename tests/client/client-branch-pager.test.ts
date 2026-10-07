@@ -3,8 +3,8 @@
 // 这里刻意用一段"假的聊天 DOM"（只保留 DSH 真实 DOM 里被依赖的那些属性：
 // data-chat-flow-kind 与承载文本的容器），因为翻页器的可见效果正是靠这两样实现的。
 
-import { beforeEach, describe, expect, it } from 'vitest'
-import { mountBranchPager, type BranchPagerHandle } from '../../src/client/branch-pager'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { mountBranchPager, type BranchPagerHandle, type BranchPagerOptions } from '../../src/client/branch-pager'
 
 function fakeStorage(): Pick<Storage, 'getItem' | 'setItem'> {
   const data = new Map<string, string>()
@@ -30,6 +30,114 @@ const pagerIn = (row: HTMLElement): HTMLElement | null => row.querySelector<HTML
 const buttonByTitle = (row: HTMLElement, title: string): HTMLButtonElement | null =>
   row.querySelector<HTMLButtonElement>(`.dsh-rewind-pro-pager button[title="${title}"]`)
 const visible = (element: HTMLElement): boolean => element.style.display !== 'none'
+
+const countInTop = (row: HTMLElement, label: '输入' | '回复'): string | null =>
+  row
+    .querySelector(`.dsh-rewind-pro-pager-stepper[title^="${label}版本"] .dsh-rewind-pro-pager-count`)
+    ?.textContent?.trim() ?? null
+
+const editViaTop = (row: HTMLElement, text: string): void => {
+  buttonByTitle(row, '以这条为起点开一个新输入版本')?.click()
+  const editor = document.querySelector<HTMLElement>('.dshet-editor')
+  const area = editor?.querySelector('textarea')
+  if (area) area.value = text
+  const submit = Array.from(editor?.querySelectorAll('button') ?? []).find(
+    (candidate) => (candidate.textContent ?? '').trim() === '分页重跑',
+  )
+  ;(submit as HTMLButtonElement | undefined)?.click()
+}
+
+describe('分页重跑接宿主（真的改提示词 + 真的重跑）', () => {
+  let handle: BranchPagerHandle | null = null
+  let storage = fakeStorage()
+  const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
+
+  beforeEach(() => {
+    handle?.dispose()
+    handle = null
+    storage = fakeStorage()
+    chatDom()
+  })
+
+  const mountWith = (extra: Partial<BranchPagerOptions>): void => {
+    handle = mountBranchPager({
+      sessionId: () => 'session-1',
+      doc: document,
+      storage,
+      readText: (row) => row.querySelector('[data-message-text]')?.textContent?.trim() ?? '',
+      askText: () => null,
+      ...extra,
+    })
+  }
+
+  const errorText = (): string => document.querySelector('.dshet-error')?.textContent?.trim() ?? ''
+
+  it('成功：先把行定位成 seq，再带新文本调用宿主；成功才关编辑器', async () => {
+    const calls: { seq: number; text: string }[] = []
+    mountWith({
+      seqOfRow: () => 7,
+      applyBranch: async (input) => {
+        calls.push(input)
+        return { ok: true }
+      },
+    })
+
+    editViaTop(userRows()[0], '甲问改')
+    await tick()
+
+    expect(calls).toEqual([{ seq: 7, text: '甲问改' }])
+    expect(document.querySelector('.dshet-editor')).toBeNull()
+  })
+
+  it('定位不到 seq 就绝不动手，并把原因显示出来（猜 seq 会改错消息）', async () => {
+    let called = 0
+    mountWith({
+      seqOfRow: () => null,
+      applyBranch: async () => {
+        called++
+        return { ok: true }
+      },
+    })
+
+    editViaTop(userRows()[0], '甲问改')
+    await tick()
+
+    expect(called).toBe(0)
+    expect(document.querySelector('.dshet-editor')).not.toBeNull()
+    expect(errorText()).toContain('定位')
+  })
+
+  it('宿主失败：原因显示出来，且**不改我自己的模型**（不假装成功）', async () => {
+    mountWith({
+      seqOfRow: () => 7,
+      applyBranch: async () => ({ ok: false, reason: 'stale: expected seq 5, found 7' }),
+    })
+
+    editViaTop(userRows()[0], '甲问改')
+    await tick()
+
+    expect(errorText()).toContain('stale')
+    expect(document.querySelector('.dshet-editor')).not.toBeNull()
+    // 输入链必须还是 1 个版本：失败时不许在本地造出一个"假分支"
+    expect(countInTop(userRows()[0], '输入')).toBeNull()
+  })
+
+  // 不清理就会带着一个还活着的翻页器进入下一个 describe，去干扰那边的用例
+  afterEach(() => {
+    handle?.dispose()
+    handle = null
+  })
+
+  it('没接宿主通道时退回纯本地分页（老行为不能丢）', async () => {
+    mountWith({})
+
+    editViaTop(userRows()[0], '甲问改')
+    await tick()
+
+    expect(countInTop(userRows()[0], '输入')).toBe('2/2')
+    expect(document.querySelector('.dshet-editor')).toBeNull()
+  })
+})
 
 describe('版本树翻页器', () => {
   let handle: BranchPagerHandle | null = null
@@ -127,18 +235,18 @@ describe('版本树翻页器', () => {
   it('编辑开新输入版本：新输入没有回复，后缀行消失；翻回去它们回来', () => {
     const pager = mount()
 
-    editVia(userRows()[0], '甲问改')
+    editViaTop(userRows()[0], '甲问改')
     pager.refresh()
 
     // 新输入版本成为当前 → 输入 2/2，且第二轮整条隐藏
-    expect(countIn(userRows()[0], '输入')).toBe('2/2')
+    expect(countInTop(userRows()[0], '输入')).toBe('2/2')
     expect(visible(userRows()[1])).toBe(false)
     expect(visible(assistantRows()[1])).toBe(false)
 
     // 翻回上一条输入版本 → 旧后缀（乙问 + 它的回复）重新显示
     buttonByTitle(userRows()[0], '上一条输入版本')?.click()
     pager.refresh()
-    expect(countIn(userRows()[0], '输入')).toBe('1/2')
+    expect(countInTop(userRows()[0], '输入')).toBe('1/2')
     expect(visible(userRows()[1])).toBe(true)
     expect(visible(assistantRows()[1])).toBe(true)
   })
@@ -223,7 +331,7 @@ describe('版本树翻页器', () => {
 
   it('模型按会话存进 storage，重新挂载后仍是分支状态', () => {
     const pager = mount()
-    editVia(userRows()[0], '甲问改')
+    editViaTop(userRows()[0], '甲问改')
     pager.refresh()
     pager.dispose()
     handle = null
@@ -231,7 +339,7 @@ describe('版本树翻页器', () => {
     chatDom()
     const again = mount()
     again.refresh()
-    expect(countIn(userRows()[0], '输入')).toBe('2/2')
+    expect(countInTop(userRows()[0], '输入')).toBe('2/2')
     expect(visible(userRows()[1])).toBe(false)
   })
 
@@ -251,7 +359,7 @@ describe('版本树翻页器', () => {
     ;(cancel as HTMLButtonElement | undefined)?.click()
     expect(document.querySelector('.dshet-editor')).toBeNull()
     pager.refresh()
-    expect(countIn(userRows()[0], '输入')).toBeNull()
+    expect(countInTop(userRows()[0], '输入')).toBeNull()
   })
 
   it('两个都装：一支笔；我的按钮插在它的保存左侧', async () => {
@@ -282,9 +390,11 @@ describe('版本树翻页器', () => {
     const area = foreign?.querySelector('textarea')
     if (area) area.value = '甲问改'
     bridge?.click()
+    // 关闭它的编辑器是**异步**的：必须等宿主结果回来才决定"关"还是"把原因留下"
+    await new Promise((resolve) => setTimeout(resolve, 0))
     pager.refresh()
 
-    expect(countIn(userRows()[0], '输入')).toBe('2/2')
+    expect(countInTop(userRows()[0], '输入')).toBe('2/2')
     expect(document.querySelector('.dshet-editor')).toBeNull()
   })
 

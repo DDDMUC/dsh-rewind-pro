@@ -100,7 +100,17 @@ export async function postJson<T>(
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body ?? {}),
     })
-    if (!response.ok) return { ok: false, status: response.status }
+    if (!response.ok) {
+      // 失败时也把响应体读出来：宿主会带原因（例如 `stale: expected seq 5`）。
+      // 「关掉 + 什么都不说」正是用户以为插件坏掉的原因。
+      let data: T | undefined
+      try {
+        data = (await response.json()) as T
+      } catch {
+        data = undefined
+      }
+      return { ok: false, status: response.status, data }
+    }
     return { ok: true, status: response.status, data: (await response.json()) as T }
   } catch {
     return { ok: false, status: 0 }
