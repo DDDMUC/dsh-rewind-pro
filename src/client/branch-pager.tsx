@@ -14,12 +14,14 @@ import {
   commitUserEdit,
   deserializeConversation,
   emptyConversation,
+  isOnPath,
   rerunReply,
   serializeConversation,
   setReplyText,
   switchInput,
   switchReply,
   type Conversation,
+  type Turn,
 } from '../core/branch.js'
 
 const PAGER_CLASS = 'dsh-rewind-pro-pager'
@@ -118,6 +120,27 @@ function collect(root: ParentNode, userSelectors: string[], assistantSelectors: 
   return { users, assistants, order }
 }
 
+/**
+ * 主干：对话区渲染出来的那条**完整线性历史** —— root → 第一个输入 → 第一个回复 →
+ * next ……（也就是最初那条链，分支都挂在它旁边）。
+ *
+ * 重新挂载时靠它把 DOM 里已有的行**认领**回模型里已有的轮：没有这一步，
+ * 恢复出来的模型就只能看着行发呆（行绑定不上 → 翻页器不出现）。
+ */
+function trunkTurns(conversation: Conversation | null): Turn[] {
+  const turns: Turn[] = []
+  const seen = new Set<string>()
+  let turn = conversation?.root ?? null
+  while (turn) {
+    if (seen.has(turn.id)) break
+    seen.add(turn.id)
+    turns.push(turn)
+    const input = turn.inputs[0]
+    turn = input?.replies[0]?.next ?? null
+  }
+  return turns
+}
+
 export function mountBranchPager(options: BranchPagerOptions): BranchPagerHandle {
   const doc = options.doc ?? document
   const storage = options.storage === undefined ? safeStorage() : options.storage
@@ -136,27 +159,67 @@ export function mountBranchPager(options: BranchPagerOptions): BranchPagerHandle
 
   let model: Conversation = emptyConversation()
   let frame = 0
-  /**
-   * 已经当作基线吸收过的用户行数（-1 = 刚加载，尚未与 DOM 对账）。
-   *
-   * 这是翻页与 DOM 的关键解耦：DOM 里永远躺着**完整**的线性历史，而我们只
-   * 隐藏不在分支上的行。若每次 refresh 都按 DOM 重建模型，编辑/重跑刚开出的
-   * 新分支会被那些仍然存在的旧行立刻拼回去 —— 后缀就永远藏不住了。
-   */
-  let absorbed = -1
   let disposed = false
+
+  /**
+   * 行 → 轮 的绑定按**元素身份**做，不按下标。
+   *
+   * 下标绑定在真实界面里必然错位：对话区是渐进渲染的（"加载更早"把更早的消息
+   * 插到顶部、流式回复让行数在两次 refresh 之间变化）。按下标的后果我实测过 ——
+   * 后渲染出来的行没进模型，于是被判成"不在当前分支上"而**被隐藏**，也就是
+   * 把用户的消息藏起来。身份绑定天然免疫这些。
+   */
+  let bound: { row: HTMLElement; turnId: string; assistants: HTMLElement[] }[] = []
+  /** 已经加载过哪个会话的模型。**每个会话只加载一次**。 */
+  let loadedKey: string | null = null
+  /**
+   * 刚从存储恢复出模型：这一轮允许用"文本一致"把 DOM 行**认领**回已有的轮。
+   *
+   * 只允许一次、且必须文本对得上：认领是唯一可能张冠李戴的动作（把某一行认到
+   * 别一轮上，补回复时就凭空多出一个版本）。认不上就不绑，那一行保持原样
+   * （可见、无控件）—— 我们绝不去动自己没有把握的行。
+   */
+  let claiming = false
+
+  const normalize = (text: string): string => text.replace(/\s+/g, ' ').trim()
+
+  /**
+   * 文本是否**指向同一条消息**。
+   *
+   * 不能要求完全相等：编辑只改模型（DOM 里仍是原话），所以模型里的 "甲问改"
+   * 与 DOM 里的 "甲问" 必须算同一轮。前缀关系足够，又不会把两条不同的消息认混。
+   */
+  const sameMessage = (a: string, b: string): boolean => {
+    const left = normalize(a)
+    const right = normalize(b)
+    if (left.length < 2 || right.length < 2) return false
+    return left === right || left.startsWith(right) || right.startsWith(left)
+  }
 
   const key = (): string => `dsh-rewind-pro.branch.${options.sessionId()}`
 
+  /**
+   * 只在**切换会话**时从存储读回模型。
+   *
+   * 原来每次 refresh 都重读一遍，而刚绑定出来的模型并没有立刻落盘 —— 于是内存里
+   * 的模型每一轮都被清空，绑定过的行随之被判成"不在分支上"而隐藏。真机上这就是
+   * "藏消息 + 冒出没人创建过的版本"。内存里的模型才是当前真相，存储只是它的持久化。
+   */
   const load = (): void => {
+    const current = key()
+    if (loadedKey === current) return
+    loadedKey = current
+    // 换了模型就必须丢掉旧绑定：那些 turnId 属于上一个模型，留着会让行
+    // "不在分支上"而被隐藏，重新绑定还会造出重复版本。
+    // （会话 id 确实会中途变化：初始可能是 unknown，真实 id 稍后才到。）
+    bound = []
     try {
-      const raw = storage?.getItem(key()) ?? null
+      const raw = storage?.getItem(current) ?? null
       model = raw ? deserializeConversation(JSON.parse(raw)) : emptyConversation()
-      absorbed = -1
     } catch {
       model = emptyConversation()
-      absorbed = -1
     }
+    claiming = model.root !== null
   }
 
   const save = (): void => {
@@ -167,48 +230,82 @@ export function mountBranchPager(options: BranchPagerOptions): BranchPagerHandle
     }
   }
 
-  /** 把 DOM 里新出现的用户行补进模型（模型只增不改，旧枝永不丢）。 */
-  const absorbRows = (rows: Rows): void => {
-    for (let index = Math.max(0, absorbed); index < rows.users.length; index++) {
-      const nodes = branchPath(model)
-      if (index < nodes.length) {
-        // 已有这一轮：正文或回复文本变了就更新（不改版本数）
-        continue
+  const boundFor = (row: HTMLElement): string | undefined =>
+    bound.find((entry) => entry.row === row)?.turnId
+
+  const assistantText = (rows: Rows, index: number): string =>
+    rows.assistants[index]?.map((row) => readText(row)).join('\n').trim() ?? ''
+
+  /**
+   * 把新出现的用户行接进模型（模型只增不改，旧枝永不丢）。
+   *
+   * 只吸收**紧接当前分支末尾**的行：它前面那一行必须已经绑定过（或模型还空）。
+   * 出现在更早位置的行（"加载更早"）不进模型，因此也不受分支可见性控制 ——
+   * 我们绝不去隐藏自己没有把握的行。
+   */
+  const bindRows = (rows: Rows): void => {
+    const trunk = trunkTurns(model)
+    rows.users.forEach((row, index) => {
+      if (boundFor(row)) return
+      // 1) 认领：只在"刚从存储恢复"这一轮，且文本对得上（见 claiming 的注释）
+      const claim = claiming ? trunk[index] : undefined
+      if (claim && !bound.some((entry) => entry.turnId === claim.id)) {
+        const claimText = claim.inputs[claim.selectedInput]?.text ?? ''
+        if (sameMessage(claimText, readText(row))) {
+          bound.push({ row, turnId: claim.id, assistants: rows.assistants[index] ?? [] })
+          return
+        }
       }
+      // 2) 追加：只在"接着分支末尾"时把行当成新的一轮
+      const previousRow = index > 0 ? rows.users[index - 1] : null
+      const previousTurnId = previousRow ? boundFor(previousRow) : undefined
+      const nodes = branchPath(model)
+      const tailTurnId = nodes[nodes.length - 1]?.turn.id
+      if (previousRow && previousTurnId === undefined) return
+      if (previousRow && previousTurnId !== tailTurnId) return
+      if (!previousRow && nodes.length > 0) return
+
       const previous = nodes[nodes.length - 1]
       if (previous && !previous.reply) {
-        const replyText = rows.assistants[index - 1]?.map((row) => readText(row)).join('\n').trim() ?? ''
-        model = rerunReply(model, previous.turn.id, replyText)
+        model = rerunReply(model, previous.turn.id, assistantText(rows, index - 1))
       }
-      model = appendTurn(model, readText(rows.users[index]))
-    }
-    // 回复正文按 DOM 补齐（流式落定后这里会把最新文本写进当前回复版本）
-    const nodes = branchPath(model)
-    for (let index = 0; index < nodes.length; index++) {
-      const text = rows.assistants[index]?.map((row) => readText(row)).join('\n').trim() ?? ''
-      const node = nodes[index]
-      if (!text || !node.reply || node.reply.text === text) continue
-      const updated = setReplyText(model, node.turn.id, text)
+      model = appendTurn(model, readText(row))
+      const created = branchPath(model)
+      const turnId = created[created.length - 1]?.turn.id
+      if (!turnId) return
+      bound.push({ row, turnId, assistants: rows.assistants[index] ?? [] })
+    })
+
+    // 认领只做一轮：之后新出现的行只能"接到末尾"，认不上就不管它
+    claiming = false
+
+    // 回复正文随 DOM 更新（流式落定后把最新文本写进当前回复版本）
+    for (const entry of bound) {
+      const text = entry.assistants.map((row) => readText(row)).join('\n').trim()
+      const node = branchPath(model).find((candidate) => candidate.turn.id === entry.turnId)
+      if (!text || !node?.reply || node.reply.text === text) continue
+      const updated = setReplyText(model, entry.turnId, text)
       if (updated !== model) model = updated
     }
   }
 
-  const applyVisibility = (rows: Rows): void => {
-    const visible = branchPath(model).length
-    rows.users.forEach((row, index) => {
-      const show = index < visible
-      row.style.display = show ? '' : 'none'
-    })
-    rows.assistants.forEach((group, index) => {
-      const show = index < visible
-      for (const row of group) row.style.display = show ? '' : 'none'
-    })
+  /** 只动**绑定过**的行：绑定不了的（更早的历史、结构不认识的）一律不碰。 */
+  const applyVisibility = (): void => {
+    for (const entry of bound) {
+      if (!entry.row.isConnected) continue
+      const onPath = isOnPath(model, entry.turnId)
+      entry.row.style.display = onPath ? '' : 'none'
+      for (const assistant of entry.assistants) {
+        if (assistant.isConnected) assistant.style.display = onPath ? '' : 'none'
+      }
+    }
   }
 
-  const renderControls = (rows: Rows): void => {
-    const nodes = branchPath(model)
-    rows.users.forEach((row, index) => {
-      const node = nodes[index]
+  const renderControls = (): void => {
+    for (const entry of bound) {
+      if (!entry.row.isConnected) continue
+      const row = entry.row
+      const node = branchPath(model).find((candidate) => candidate.turn.id === entry.turnId)
       const host = actionHost(row)
       // 在整个行里找（而不是 :scope > ），宿主位置随刷新漂移时也不会重复注入
       let pager = row.querySelector<HTMLElement>(`.${PAGER_CLASS}`)
@@ -219,8 +316,9 @@ export function mountBranchPager(options: BranchPagerOptions): BranchPagerHandle
       }
       pager.textContent = ''
       if (!node) {
+        // 不在当前分支上：这一行本身也被隐藏了，控件跟着收起
         pager.style.display = 'none'
-        return
+        continue
       }
       pager.style.display = ''
       const turnId = node.turn.id
@@ -258,7 +356,7 @@ export function mountBranchPager(options: BranchPagerOptions): BranchPagerHandle
           refresh()
         }),
       )
-    })
+    }
   }
 
   /**
@@ -288,14 +386,11 @@ export function mountBranchPager(options: BranchPagerOptions): BranchPagerHandle
     updateWarn(rows)
     if (rows.users.length === 0) return
     load()
-    // 刚从存储恢复时，把当前 DOM 里的行全部当作基线（它们属于历史，不是新消息）
-    // 模型里还没有任何轮 → DOM 就是基线，全部吸收；
-    // 模型非空（刚从 storage 恢复）→ 现有行属于历史，只吸收超出的新行。
-    if (absorbed < 0) absorbed = model.root ? rows.users.length : 0
-    absorbRows(rows)
-    absorbed = rows.users.length
-    renderControls(rows)
-    applyVisibility(rows)
+    // 已经在 DOM 里被移除的行不再管它
+    bound = bound.filter((entry) => entry.row.isConnected)
+    bindRows(rows)
+    renderControls()
+    applyVisibility()
   }
 
   const schedule = (): void => {

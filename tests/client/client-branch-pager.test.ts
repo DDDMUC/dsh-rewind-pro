@@ -105,6 +105,68 @@ describe('版本树翻页器', () => {
     expect(visible(assistantRows()[1])).toBe(true)
   })
 
+  it('渐进渲染：后出现的行不会被当成历史而隐藏（真机踩过的 bug）', () => {
+    // 真实界面是一点点渲染出来的：第一次 refresh 可能只看到第一轮
+    document.body.innerHTML =
+      '<div data-chat-flow-kind="user"><span data-message-text>甲问</span></div>' +
+      '<div data-chat-flow-kind="assistant-step"><span data-message-text>答甲</span></div>'
+    const pager = mount()
+    pager.refresh()
+    expect(userRows()).toHaveLength(1)
+
+    // 第二轮随后渲染出来
+    document.body.insertAdjacentHTML(
+      'beforeend',
+      '<div data-chat-flow-kind="user"><span data-message-text>乙问</span></div>' +
+        '<div data-chat-flow-kind="assistant-step"><span data-message-text>答乙</span></div>',
+    )
+    pager.refresh()
+
+    expect(userRows()).toHaveLength(2)
+    // 两行都必须在场：旧实现把后出现的行判成"不在分支上"而藏掉
+    expect(visible(userRows()[0])).toBe(true)
+    expect(visible(userRows()[1])).toBe(true)
+    // 也不该冒出谁都没创建过的第二版本
+    expect(countIn(userRows()[1], '回复')).toBeNull()
+    expect(countIn(userRows()[0], '回复')).toBeNull()
+  })
+
+  it('"加载更早"插到顶部的行：我们不碰它（只隐藏自己确凿映射过的）', () => {
+    const pager = mount()
+    pager.refresh()
+    document.body.insertAdjacentHTML('afterbegin', '<div data-chat-flow-kind="user"><span data-message-text>更早</span></div>')
+    pager.refresh()
+
+    expect(userRows()).toHaveLength(3)
+    expect(visible(userRows()[0])).toBe(true)
+    expect(visible(userRows()[1])).toBe(true)
+    expect(pagerIn(userRows()[0])).toBeNull() // 没映射 → 不给它装控件，也不动它的显示
+  })
+
+  it('会话 id 中途变化（unknown → 真实 id）时不藏消息、不留幽灵版本', () => {
+    // 真实界面里 sessionId() 一开始可能还是空的/unknown，稍后才解析出真 id。
+    // key 一变就必须重建绑定，否则旧 turnId 留在绑定里 → 行被判成"不在分支上"
+    // 而隐藏，重绑过程还会再造一个版本。
+    let sid = 'unknown'
+    handle = mountBranchPager({
+      sessionId: () => sid,
+      doc: document,
+      storage,
+      readText: (row) => row.querySelector('[data-message-text]')?.textContent?.trim() ?? '',
+      askText: () => null,
+    })
+    handle.refresh()
+    expect(visible(userRows()[0])).toBe(true)
+
+    sid = 'session-1'
+    handle.refresh()
+
+    expect(userRows()).toHaveLength(2)
+    for (const row of userRows()) expect(visible(row)).toBe(true)
+    expect(countIn(userRows()[0], '回复')).toBeNull()
+    expect(countIn(userRows()[1], '回复')).toBeNull()
+  })
+
   it('模型按会话存进 storage，重新挂载后仍是分支状态', () => {
     const pager = mount(() => '甲问改')
     buttonByTitle(userRows()[0], '以这条为起点开一个新输入版本')?.click()
