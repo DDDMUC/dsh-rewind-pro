@@ -53,12 +53,21 @@ describe('版本树翻页器', () => {
     return handle
   }
 
+  /** 翻页器上显示的 "n/N"（按输入/回复两条链分别取）。 */
+  const countIn = (row: HTMLElement, label: '输入' | '回复'): string | null =>
+    row
+      .querySelector(`.dsh-rewind-pro-pager-stepper[title^="${label}版本"] .dsh-rewind-pro-pager-count`)
+      ?.textContent?.trim() ?? null
+
   it('把控件注入到每一个用户行里', () => {
     mount()
     for (const row of userRows()) expect(pagerIn(row)).not.toBeNull()
-    // 单链：两个翻页器都只有 1/1
-    expect(pagerIn(userRows()[0])?.textContent).toContain('输入 1/1')
-    expect(pagerIn(userRows()[0])?.textContent).toContain('回复 1/1')
+    // 单版本时**不摆** 1/1（那是噪声，还会把动作区撑长），只留两个图标动作；
+    // 文字都在 title / aria-label 里，可读性不丢。
+    expect(pagerIn(userRows()[0])?.querySelector('[title="上一条输入版本"]')).toBeNull()
+    expect(pagerIn(userRows()[0])?.querySelector('[title="上一条回复版本"]')).toBeNull()
+    expect(pagerIn(userRows()[0])?.querySelector('button[aria-label="编辑"]')).not.toBeNull()
+    expect(pagerIn(userRows()[0])?.querySelector('button[aria-label="重跑"]')).not.toBeNull()
   })
 
   it('编辑开新输入版本：新输入没有回复，后缀行消失；翻回去它们回来', () => {
@@ -68,14 +77,14 @@ describe('版本树翻页器', () => {
     pager.refresh()
 
     // 新输入版本成为当前 → 输入 2/2，且第二轮整条隐藏
-    expect(pagerIn(userRows()[0])?.textContent).toContain('输入 2/2')
+    expect(countIn(userRows()[0], '输入')).toBe('2/2')
     expect(visible(userRows()[1])).toBe(false)
     expect(visible(assistantRows()[1])).toBe(false)
 
     // 翻回上一条输入版本 → 旧后缀（乙问 + 它的回复）重新显示
     buttonByTitle(userRows()[0], '上一条输入版本')?.click()
     pager.refresh()
-    expect(pagerIn(userRows()[0])?.textContent).toContain('输入 1/2')
+    expect(countIn(userRows()[0], '输入')).toBe('1/2')
     expect(visible(userRows()[1])).toBe(true)
     expect(visible(assistantRows()[1])).toBe(true)
   })
@@ -86,12 +95,12 @@ describe('版本树翻页器', () => {
     buttonByTitle(userRows()[0], '给这条回复再生成一个版本（新分支）')?.click()
     pager.refresh()
 
-    expect(pagerIn(userRows()[0])?.textContent).toContain('回复 2/2')
+    expect(countIn(userRows()[0], '回复')).toBe('2/2')
     expect(visible(userRows()[1])).toBe(false)
 
     buttonByTitle(userRows()[0], '上一条回复版本')?.click()
     pager.refresh()
-    expect(pagerIn(userRows()[0])?.textContent).toContain('回复 1/2')
+    expect(countIn(userRows()[0], '回复')).toBe('1/2')
     expect(visible(userRows()[1])).toBe(true)
     expect(visible(assistantRows()[1])).toBe(true)
   })
@@ -106,7 +115,7 @@ describe('版本树翻页器', () => {
     chatDom()
     const again = mount()
     again.refresh()
-    expect(pagerIn(userRows()[0])?.textContent).toContain('输入 2/2')
+    expect(countIn(userRows()[0], '输入')).toBe('2/2')
     expect(visible(userRows()[1])).toBe(false)
   })
 

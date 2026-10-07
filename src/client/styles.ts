@@ -53,6 +53,38 @@ export const CSS = `
 .dsh-rewind-pro-btn:focus-visible { outline: 1px solid var(--dsw-alias-brand, #4d6bfe); outline-offset: 1px; }
 .dsh-rewind-pro-btn[data-active='true'] { color: var(--dsw-alias-brand, #4d6bfe); }
 
+/* 版本树翻页器。它贴在行自己的动作区里，所以必须"安静"：12px、一律不换行、
+   只有真的存在多个版本时才摆出 ‹ n/N ›。动作按钮用图标（✎ / ⟳）而不是中文，
+   因为 22px 的按钮里塞中文一定会被挤成竖排 —— 那正是它一开始很难看的原因。 */
+.dsh-rewind-pro-pager {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  gap: 2px;
+  margin-left: 2px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--dsw-alias-label-tertiary, inherit);
+  white-space: nowrap;
+}
+.dsh-rewind-pro-pager-stepper { display: inline-flex; align-items: center; gap: 1px; white-space: nowrap; }
+.dsh-rewind-pro-pager-label { opacity: 0.7; white-space: nowrap; }
+.dsh-rewind-pro-pager-count {
+  min-width: 22px;
+  padding: 0 1px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.dsh-rewind-pro-pager-sep {
+  width: 1px;
+  height: 12px;
+  margin: 0 3px;
+  background: var(--dsw-alias-border, rgba(127, 127, 127, 0.3));
+}
+/* 图标按钮比 ↶ 再小一号，四个挤在一行也不至于抢戏 */
+.dsh-rewind-pro-pager-btn { width: 18px; height: 18px; border-radius: 5px; }
+
 .dsh-rewind-pro-pill,
 .dsh-rewind-pro-banner,
 .dsh-rewind-pro-popover,

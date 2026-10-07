@@ -224,18 +224,27 @@ export function mountBranchPager(options: BranchPagerOptions): BranchPagerHandle
       }
       pager.style.display = ''
       const turnId = node.turn.id
+      const inputStepper = stepper(doc, '输入', node.turn.selectedInput, node.turn.inputs.length, (next) => {
+        model = switchInput(model, turnId, next)
+        save()
+        refresh()
+      })
+      const replyStepper = stepper(doc, '回复', node.input.selectedReply, node.input.replies.length, (next) => {
+        model = switchReply(model, turnId, next)
+        save()
+        refresh()
+      })
+
+      // 单版本时 stepper 返回 null（那一行本来没什么可翻的），只留两个图标动作。
+      if (inputStepper) pager.append(inputStepper)
+      if (inputStepper && replyStepper) {
+        const separator = doc.createElement('span')
+        separator.className = `${PAGER_CLASS}-sep`
+        pager.append(separator)
+      }
+      if (replyStepper) pager.append(replyStepper)
 
       pager.append(
-        stepper(doc, '输入', node.turn.selectedInput, node.turn.inputs.length, (next) => {
-          model = switchInput(model, turnId, next)
-          save()
-          refresh()
-        }),
-        stepper(doc, '回复', node.input.selectedReply, node.input.replies.length, (next) => {
-          model = switchReply(model, turnId, next)
-          save()
-          refresh()
-        }),
         action(doc, '编辑', () => {
           const text = askText(node.input.text)
           if (text === null || text === node.input.text) return
@@ -312,18 +321,23 @@ export function mountBranchPager(options: BranchPagerOptions): BranchPagerHandle
   }
 }
 
-function stepper(doc: Document, label: string, selected: number, total: number, onPick: (index: number) => void): HTMLElement {
+/** 翻页器；链上只有一个版本时返回 null（调用方据此不占位）。 */
+function stepper(
+  doc: Document,
+  label: string,
+  selected: number,
+  total: number,
+  onPick: (index: number) => void,
+): HTMLElement | null {
   const box = doc.createElement('span')
   box.className = `${PAGER_CLASS}-stepper`
   box.title = `${label}版本：当前 ${String(selected + 1)}/${String(total)}`
-  if (total <= 1) {
-    box.textContent = `${label} 1/1`
-    box.dataset.empty = 'true'
-    return box
-  }
+  // 只有一个版本时不占位置：那一行本来就没什么可翻的，摆个 "1/1" 纯属噪声，
+  // 而且会把行里的动作区撑得很长。翻页器只在**真的有多个版本**时现身。
+  if (total <= 1) return null
   const before = doc.createElement('button')
   before.type = 'button'
-  before.className = 'dsh-rewind-pro-btn'
+  before.className = `dsh-rewind-pro-btn ${PAGER_CLASS}-btn`
   before.textContent = '‹'
   before.title = `上一条${label}版本`
   before.addEventListener('click', (event) => {
@@ -333,7 +347,7 @@ function stepper(doc: Document, label: string, selected: number, total: number, 
   })
   const after = doc.createElement('button')
   after.type = 'button'
-  after.className = 'dsh-rewind-pro-btn'
+  after.className = `dsh-rewind-pro-btn ${PAGER_CLASS}-btn`
   after.textContent = '›'
   after.title = `下一条${label}版本`
   after.addEventListener('click', (event) => {
@@ -341,18 +355,31 @@ function stepper(doc: Document, label: string, selected: number, total: number, 
     event.stopPropagation()
     onPick((selected + 1) % total)
   })
+  const name = doc.createElement('span')
+  name.className = `${PAGER_CLASS}-label`
+  // 末尾留一个空格：CSS 布局靠 gap，但 textContent 里连在一起就读不通了
+  name.textContent = `${label} `
   const caption = doc.createElement('span')
-  caption.textContent = `${label} ${String(selected + 1)}/${String(total)}`
-  box.append(before, caption, after)
+  caption.className = `${PAGER_CLASS}-count`
+  caption.textContent = `${String(selected + 1)}/${String(total)}`
+  box.append(name, before, caption, after)
   return box
 }
 
-function action(doc: Document, label: string, onPick: () => void): HTMLElement {
+/**
+ * 行动作：**图标**而不是中文。
+ *
+ * 按钮是 22px（现在 18px）见方的图标位，中文塞进去必然被挤成竖排 —— 这正是
+ * 第一版"编辑/重跑"在界面上断开成两行的原因。文字留在 `title` / `aria-label`
+ * 里，可读性不丢。
+ */
+function action(doc: Document, label: '编辑' | '重跑', onPick: () => void): HTMLElement {
   const button = doc.createElement('button')
   button.type = 'button'
-  button.className = 'dsh-rewind-pro-btn'
-  button.textContent = label
+  button.className = `dsh-rewind-pro-btn ${PAGER_CLASS}-btn`
+  button.textContent = label === '编辑' ? '✎' : '⟳'
   button.title = label === '编辑' ? '以这条为起点开一个新输入版本' : '给这条回复再生成一个版本（新分支）'
+  button.setAttribute('aria-label', label)
   button.addEventListener('click', (event) => {
     event.preventDefault()
     event.stopPropagation()
