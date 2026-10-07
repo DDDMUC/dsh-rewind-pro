@@ -118,3 +118,26 @@ export async function postJson<T>(
 }
 
 export type { Capability, HiddenRange, HistoryEntry, PendingState, Strategy }
+
+/**
+ * 把「分页重跑」的失败翻译成一句**看得懂、也知道下一步**的话。
+ *
+ * 最要紧的是 404：它意味着宿主那一半还是旧模块（插件宿主模块被进程按 id 持有，
+ * 卸载再挂载不会重新 import），只能重启 `dsh web`。原样丢一句 "HTTP 404"
+ * 用户既不知道发生了什么，也不知道要做什么。
+ */
+export function branchFailureReason(status: number, error?: string): string {
+  const detail = typeof error === 'string' && error.trim() !== '' ? error.trim() : ''
+  if (status === 404) {
+    return '宿主那一半还没重新加载，这一步**没有生效**：请重启 dsh web（关掉再启动）后重试。'
+  }
+  if (status === 0) {
+    return '连不上宿主（网络或服务未启动），这一步没有生效。'
+  }
+  if (detail !== '') {
+    return status === 400 || status === 409
+      ? `宿主拒绝了这次分页重跑：${detail}`
+      : `宿主出错了（HTTP ${String(status)}）：${detail}`
+  }
+  return `宿主拒绝了这次分页重跑（HTTP ${String(status)}）。`
+}

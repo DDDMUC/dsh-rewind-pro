@@ -21,7 +21,7 @@ import { CollapsedPill } from './collapsed-pill.js'
 import { HistoryPanel } from './history-panel.js'
 import { SettingsCard } from './settings-card.js'
 import { ImpactPopover } from './popover.js'
-import { apiPath, postJson } from './contract.js'
+import { apiPath, branchFailureReason, postJson } from './contract.js'
 import type { CandidatesResponse, SessionView, UndoResponse } from './contract.js'
 import type { Capability, ImpactPlan, PluginConfig, RewindCandidate } from '../core/types.js'
 
@@ -396,11 +396,8 @@ export function apply(ctx: ClientContext, injectedConfig?: Partial<PluginConfig>
         config.apiPrefix ? { prefix: config.apiPrefix } : {},
       )
       if (result.ok) return { ok: true }
-      const reason =
-        typeof result.data?.error === 'string'
-          ? result.data.error
-          : `宿主拒绝了这次分页重跑（HTTP ${String(result.status)}）。`
-      return { ok: false, reason }
+      // 失败原因要能指导下一步：404 意味着"宿主半还没重新加载"，不是"被拒绝"
+      return { ok: false, reason: branchFailureReason(result.status, result.data?.error) }
     },
   })
 
