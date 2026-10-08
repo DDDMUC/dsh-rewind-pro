@@ -301,11 +301,22 @@ export function createRewindController(deps: ControllerDeps): RewindController {
         return { ok: false, reason: shadow.reason ?? 'shadow-failed', shadowed: false }
       }
 
+      // "被接受"不等于"落地"：DSH 会把 requestId 持久化在**被接受的那条用户
+      // 消息**上，所以消息数没变就说明它根本没进日志（真机上遇到过：会话未激活）。
+      const messagesBefore = adapter.messagesOf(sessionId).length
       const prompted = await adapter.promptSession(sessionId, text)
       if (!prompted.ok) {
         return {
           ok: false,
           reason: prompted.reason ?? 'prompt-failed',
+          shadowed: true,
+          shadowedSeqs: planned.plan.shadowed,
+        }
+      }
+      if (adapter.messagesOf(sessionId).length <= messagesBefore) {
+        return {
+          ok: false,
+          reason: '提示词没有被会话接受（会话可能未激活）：请先在浏览器里打开这条对话，再点一次分页重跑。',
           shadowed: true,
           shadowedSeqs: planned.plan.shadowed,
         }

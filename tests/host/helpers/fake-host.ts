@@ -129,8 +129,13 @@ export class FakeHost implements HarnessAdapter {
     return this.shadowVerdict
   }
   shadowVerdict: { ok: boolean; reason?: string } = { ok: true }
+  /** prompt 是否真的往日志里落了消息；关掉它来模拟"会话未激活"。 */
+  promptLands = true
   async promptSession(sessionId: string, text: string): Promise<{ ok: boolean; reason?: string }> {
     this.prompts.push({ sessionId, text })
+    if (this.promptVerdict.ok && this.promptLands) {
+      this.messages = [...this.messages, { seq: 9000 + this.messages.length, role: 'user', text }]
+    }
     return this.promptVerdict
   }
   promptVerdict: { ok: boolean; reason?: string } = { ok: true }
