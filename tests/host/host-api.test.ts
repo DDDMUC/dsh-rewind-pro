@@ -64,7 +64,7 @@ describe('POST /branch/apply（分页重跑）', () => {
 
     expect(res.status).toBe(200)
     expect(res.body).toMatchObject({ ok: true, shadowed: true })
-    expect(host.prompts).toEqual([{ sessionId: 'session-1', text: '改写后的提示词' }])
+    expect(host.prompts[0]).toMatchObject({ sessionId: 'session-1', text: '改写后的提示词' })
     expect(host.shadows).toHaveLength(1)
   })
 

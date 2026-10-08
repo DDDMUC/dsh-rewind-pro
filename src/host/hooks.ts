@@ -88,6 +88,8 @@ export interface RewindController {
     sessionId: string
     targetSeq: number
     text: string
+    /** 投递模式：空闲会话用 queue，正忙的会话要 steer 才会立刻落地。 */
+    mode?: 'queue' | 'steer'
   }) => Promise<{ ok: boolean; reason?: string; shadowed?: boolean; shadowedSeqs?: number[] }>
   cancel: (input: { sessionId: string }) => Promise<ActionResult>
   commit: (input: { sessionId: string }) => Promise<ActionResult>
@@ -282,7 +284,7 @@ export function createRewindController(deps: ControllerDeps): RewindController {
      * （否则等于往一份没遮蔽的历史里再塞一条提示词，模型会看到两份）。
      * 遮蔽成功而重跑被拒时，`shadowed: true` 如实说明日志已经变了。
      */
-    async applyBranch({ sessionId, targetSeq, text }) {
+    async applyBranch({ sessionId, targetSeq, text, mode = 'queue' }) {
       // 先确认"能重跑"再动手遮蔽：遮蔽成功而重跑失败会留下半完成状态
       // （那段历史被遮掉、却没有新提示词补上），真机上踩过一次。
       if (!adapter.canPrompt()) {
@@ -304,7 +306,7 @@ export function createRewindController(deps: ControllerDeps): RewindController {
       // "被接受"不等于"落地"：DSH 会把 requestId 持久化在**被接受的那条用户
       // 消息**上，所以消息数没变就说明它根本没进日志（真机上遇到过：会话未激活）。
       const messagesBefore = adapter.messagesOf(sessionId).length
-      const prompted = await adapter.promptSession(sessionId, text)
+      const prompted = await adapter.promptSession(sessionId, text, mode)
       if (!prompted.ok) {
         return {
           ok: false,
@@ -314,6 +316,13 @@ export function createRewindController(deps: ControllerDeps): RewindController {
         }
       }
       if (adapter.messagesOf(sessionId).length <= messagesBefore) {
+        // 会话正忙时 `queue` 只会排队等当前回合结束（真机上表现为「被接受却不落地」）。
+        // 换另一个模式再试一次：`steer` 是往正在进行的回合里注入。
+        const other: 'queue' | 'steer' = mode === 'steer' ? 'queue' : 'steer'
+        const retry = await adapter.promptSession(sessionId, text, other)
+        if (retry.ok && adapter.messagesOf(sessionId).length > messagesBefore) {
+          return { ok: true, shadowed: true, shadowedSeqs: planned.plan.shadowed }
+        }
         return {
           ok: false,
           reason: '提示词没有被会话接受（会话可能未激活）：请先在浏览器里打开这条对话，再点一次分页重跑。',

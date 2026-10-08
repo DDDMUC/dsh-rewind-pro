@@ -159,6 +159,64 @@ describe('branch shadow（分页重跑的第一步：真的遮蔽）', () => {
     expect(result.ok).toBe(true)
     expect(appends).toHaveLength(5)
   })
+
+  it('回合还开着时只追加替身，绝不合成新回合（合成会写出无法加载的日志）', async () => {
+    // 真机踩过：agent loop 正跑着（工具调用挂起）时用户点了回退，替身被包在
+    // `turn/start{新回合}` 里写进日志。DSH 的日志校验要求回合严格嵌套，于是
+    // 冷读整份历史直接失败：
+    //   SessionFormatError: turn/start does not open the expected turn
+    //   -> session "...": stored log is corrupt
+    // 开着的回合里只允许追加替身本身，坐标必须落在当前开着的 turn/step 上。
+    const appends: AppendRecord[] = []
+    const session = {
+      ...makeSession(appends),
+      snapshotEvents: () => [
+        { type: 'turn/start', seq: 0, data: { turn: 7 } },
+        { type: 'step/start', seq: 1, data: { turn: 7, step: 1 } },
+        { type: 'user/message', seq: 2, data: { turn: 7, step: 1 } },
+        { type: 'step/end', seq: 3, data: { turn: 7, step: 1 } },
+        { type: 'step/start', seq: 4, data: { turn: 7, step: 2 } },
+        { type: 'assistant/message', seq: 5, data: { turn: 7, step: 2 } },
+        { type: 'tool/call', seq: 6, data: { turn: 7, step: 2 } },
+      ],
+    }
+    const probe = detectAdapter({ sessions: { list: () => [session], get: () => session } })
+
+    const result = await probe.adapter.shadowWindow(undefined, {
+      startSeq: 3,
+      endSeq: 6,
+      shadowed: [3, 5, 6],
+      turn: 8,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(appends.map((entry) => entry.type)).toEqual(['system/message'])
+    const data = appends[0].data as { turn?: unknown; step?: unknown; message?: { role?: unknown } }
+    expect(data.turn).toBe(7)
+    expect(data.step).toBe(2)
+    expect(data.message?.role).toBe('system')
+    expect(appends[0].opts.surfaceOp).toEqual({ op: 'replace', startSeq: 3, endSeq: 6 })
+    expect(appends[0].opts.sourceEventSeqs).toEqual([3, 5, 6])
+  })
+
+  it('回合开着但步骤闭合时明确拒绝，而不是硬写出一个非法回合', async () => {
+    const appends: AppendRecord[] = []
+    const session = {
+      ...makeSession(appends),
+      snapshotEvents: () => [
+        { type: 'turn/start', seq: 0, data: { turn: 7 } },
+        { type: 'step/start', seq: 1, data: { turn: 7, step: 1 } },
+        { type: 'step/end', seq: 2, data: { turn: 7, step: 1 } },
+      ],
+    }
+    const probe = detectAdapter({ sessions: { list: () => [session], get: () => session } })
+
+    const result = await probe.adapter.shadowWindow(undefined, { startSeq: 3, endSeq: 4, shadowed: [3, 4], turn: 8 })
+
+    expect(result.ok).toBe(false)
+    expect(result.reason).toContain('between steps')
+    expect(appends).toHaveLength(0)
+  })
 })
 
 describe('rerun prompt（分页重跑的第二步：真的重跑）', () => {
@@ -210,6 +268,27 @@ describe('rerun prompt（分页重跑的第二步：真的重跑）', () => {
 
     expect(result.ok).toBe(true)
     expect(calls).toHaveLength(1)
+  })
+
+  it('可以指定投递模式（queue/steer）——"被接受却不落地"时两种都要能试', async () => {
+    const calls: Record<string, unknown>[] = []
+    const ctx = {
+      get: (name: string) =>
+        name === 'sessionController'
+          ? {
+              prompt: (request: Record<string, unknown>) => {
+                calls.push(request)
+                return Promise.resolve({ accepted: true })
+              },
+            }
+          : undefined,
+      sessions: { list: () => [], get: () => undefined },
+    }
+
+    const probe = detectAdapter(ctx)
+    await probe.adapter.promptSession('session-1', '甲改', 'steer')
+
+    expect(calls[0]?.mode).toBe('steer')
   })
 
   it('prompt 抛错时把**原始错误**带出来（否则下次失败又是一句笼统的话）', async () => {

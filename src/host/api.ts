@@ -137,11 +137,12 @@ export function createRewindApi(deps: ApiDeps): RewindApi {
         const targetSeq = Number(body.targetSeq)
         if (!Number.isFinite(targetSeq)) return json(400, { error: 'bad-target' })
         const text = typeof body.text === 'string' ? body.text : ''
+        const mode = body.mode === 'steer' ? 'steer' : 'queue'
         if (text.trim() === '') return json(400, { error: 'bad-text' })
-        const result = await controller.applyBranch({ sessionId: sid, targetSeq, text })
+        const result = await controller.applyBranch({ sessionId: sid, targetSeq, text, mode })
         publish(sid)
         return result.ok
-          ? json(200, { ok: true, shadowed: true, shadowedSeqs: result.shadowedSeqs ?? [] })
+          ? json(200, { ok: true, shadowed: true, mode, shadowedSeqs: result.shadowedSeqs ?? [] })
           : json(409, { error: result.reason, shadowed: result.shadowed === true })
       }
 
