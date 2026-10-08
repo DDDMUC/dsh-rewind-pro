@@ -80,10 +80,17 @@ export interface HarnessAdapter {
   /**
    * 遮蔽一个 surface 窗口（追加式日志的唯一改法：写一个带 replace 的替身事件）。
    *
-   * 写入序列抄自 `dsh-rerun-turn` 的 `buildShadowWrites`：合成一个记账回合
-   * （turn/start → step/start → 替身 → step/end → turn/end），替身是**空内容的
-   * system/message**。刻意不用可见的 user 消息当替身：提示词随后要由
-   * `promptSession` 重新送进去，否则界面上会出现两条提示词。
+   * 替身是**空内容的 system/message**（刻意不用可见的 user 消息：提示词随后要由
+   * `promptSession` 重新送进去，否则界面上会出现两条提示词），它是 surface 事件，
+   * 必须落在开着的 turn/step 坐标上：
+   *
+   *   * 日志里已有未闭合回合（agent loop 正在跑）——替身直接追加进那个回合的当前
+   *     步骤。**绝不合成回合**：`turn/start` 套在未闭合回合里是非法日志，会让整份
+   *     会话历史再也加载不出来。
+   *   * 日志处于回合之间（空闲）——才合成一个记账回合
+   *     （turn/start → step/start → 替身 → step/end → turn/end），回合号用
+   *     `plan.turn`。
+   *   * 回合开着但步骤闭合——明确拒绝，让上层在下一个步骤重试。
    *
    * `expectedSeq` 是规划时看到的日志长度；不符就整体拒绝（半截写入会留下悬空回合）。
    */
@@ -107,7 +114,11 @@ export interface HarnessAdapter {
    * 它会**追加一条新的用户消息**并触发一次生成；调用方负责先把旧窗口遮蔽掉，
    * 否则历史里会有两份提示词。
    */
-  promptSession: (sessionId: string, text: string) => Promise<{ ok: boolean; reason?: string }>
+  promptSession: (
+    sessionId: string,
+    text: string,
+    mode?: 'queue' | 'steer',
+  ) => Promise<{ ok: boolean; reason?: string }>
   /** Whether the reversible rewind primitive (session fork) is available. */
   canFork: () => boolean
   /**
@@ -501,10 +512,70 @@ export function detectAdapter(ctx: unknown): AdapterProbe {
   let projectionVerdict: Promise<{ registration: boolean; deletion: boolean; reason?: string }> | null = null
 
   /**
-   * 遮蔽窗口：合成一个记账回合 + 一个空内容的 system 替身，替身带 replace。
+   * 日志里当前**未闭合**的 turn/step 坐标。
    *
-   * 顺序照 `dsh-rerun-turn`：turn/start → step/start → 替身 → step/end → turn/end。
-   * 回合号必须接在日志已有的最大值之后（`plan.turn` 由 foldSurface 算好）。
+   * 遮蔽替身是 surface 事件，DSH 的日志校验要求它落在一个开着的 turn/step 上
+   * （`system/message does not match an open turn and step`），而且回合必须严格
+   * 嵌套：`turn/start` 只能在没有任何未闭合回合时开启。当遮蔽发生在 agent loop
+   * 跑动中间（工具调用挂起时用户点了回退），这里就是那个开着的回合；此时**再
+   * 合成一个新回合会写出非法日志**，之后整份会话历史都会加载失败。
+   *
+   * 返回 `null` 表示当前没有可用的开着坐标（回合之间、或回合开着但步骤闭合）；
+   * 调用方据此决定合成回合还是拒绝。
+   */
+  const openCoordinates = (
+    session: LiveSession,
+  ): { turn: number; step: number } | null => {
+    const events = safeCall<SurfaceEventLike[]>(session, 'snapshotEvents') ?? []
+    let turn: number | null = null
+    let step: number | null = null
+    for (const event of events) {
+      const data = (event as { data?: { turn?: unknown; step?: unknown } }).data
+      const eventTurn = typeof data?.turn === 'number' ? data.turn : undefined
+      const eventStep = typeof data?.step === 'number' ? data.step : undefined
+      if (event.type === 'turn/start' && eventTurn !== undefined) {
+        turn = eventTurn
+        step = null
+      } else if (event.type === 'turn/end') {
+        turn = null
+        step = null
+      } else if (event.type === 'step/start' && eventStep !== undefined) {
+        step = eventStep
+      } else if (event.type === 'step/end') {
+        step = null
+      }
+    }
+    if (turn === null || step === null) return null
+    return { turn, step }
+  }
+
+  /** 日志里是否还有一个未闭合的回合（用来区分"回合之间"和"步骤之间"）。 */
+  const openTurn = (session: LiveSession): number | null => {
+    const events = safeCall<SurfaceEventLike[]>(session, 'snapshotEvents') ?? []
+    let turn: number | null = null
+    for (const event of events) {
+      const data = (event as { data?: { turn?: unknown } }).data
+      if (event.type === 'turn/start' && typeof data?.turn === 'number') turn = data.turn
+      else if (event.type === 'turn/end') turn = null
+    }
+    return turn
+  }
+
+  /**
+   * 遮蔽窗口：写一个带 replace 的**空内容 system 替身**。
+   *
+   * 替身是 surface 事件，所以它必须落在开着的 turn/step 坐标上。这里分两种
+   * 情况：
+   *
+   *   * 日志里已有未闭合回合（agent loop 正在跑）——直接把替身追加到那个回合
+   *     的当前步骤里。**不要**合成回合：那会写出 `turn/start` 套在未闭合回合
+   *     里的非法日志，之后整份历史都会加载失败。
+   *   * 日志处于回合之间（空闲）——才需要合成一个记账回合
+   *     （turn/start → step/start → 替身 → step/end → turn/end），回合号用
+   *     `plan.turn`（= 日志里最大回合号 + 1）。
+   *
+   * 刻意不用可见的 user 消息当替身：提示词随后要由 `promptSession` 重新送进去，
+   * 否则界面上会出现两条提示词。
    */
   const shadowWindow = async (
     sessionId: string | undefined,
@@ -518,9 +589,18 @@ export function detectAdapter(ctx: unknown): AdapterProbe {
       return { ok: false, reason: `stale: expected seq ${String(expectedSeq)}, found ${String(observed)}` }
     }
 
+    const open = openCoordinates(session)
+    if (open === null && openTurn(session) !== null) {
+      // 回合开着但步骤闭合（两次 LLM 调用之间）：此刻既不能把替身挂到开着的
+      // turn/step 上，也不能合成新回合——两种写法都会产出无法加载的日志。
+      // 宁可明确拒绝，让上层在下一个步骤里重试，也不要污染会话历史。
+      return { ok: false, reason: 'session is between steps; retry once the next step opens' }
+    }
+    const turn = open?.turn ?? plan.turn
+    const step = open?.step ?? 1
     const carrier = {
-      turn: plan.turn,
-      step: 1,
+      turn,
+      step,
       message: {
         id: randomUUID(),
         role: 'system',
@@ -528,20 +608,23 @@ export function detectAdapter(ctx: unknown): AdapterProbe {
         source: { kind: 'system-prompt', plugin: PLUGIN_ID, carrierFor: 'surface-shadow' },
       },
     }
-    const writes: { type: string; data: unknown; opts?: Record<string, unknown> }[] = [
-      { type: 'turn/start', data: { turn: plan.turn } },
-      { type: 'step/start', data: { turn: plan.turn, step: 1 } },
-      {
-        type: 'system/message',
-        data: carrier,
-        opts: {
-          surfaceOp: { op: 'replace', startSeq: plan.startSeq, endSeq: plan.endSeq },
-          sourceEventSeqs: [...plan.shadowed],
-        },
+    const carrierWrite = {
+      type: 'system/message',
+      data: carrier,
+      opts: {
+        surfaceOp: { op: 'replace', startSeq: plan.startSeq, endSeq: plan.endSeq },
+        sourceEventSeqs: [...plan.shadowed],
       },
-      { type: 'step/end', data: { turn: plan.turn, step: 1 } },
-      { type: 'turn/end', data: { turn: plan.turn, reason: { kind: 'completed' } } },
-    ]
+    }
+    const writes: { type: string; data: unknown; opts?: Record<string, unknown> }[] = open
+      ? [carrierWrite]
+      : [
+          { type: 'turn/start', data: { turn: plan.turn } },
+          { type: 'step/start', data: { turn: plan.turn, step: 1 } },
+          carrierWrite,
+          { type: 'step/end', data: { turn: plan.turn, step: 1 } },
+          { type: 'turn/end', data: { turn: plan.turn, reason: { kind: 'completed' } } },
+        ]
 
     for (const write of writes) {
       const args: unknown[] = write.opts ? [write.opts] : []
@@ -587,7 +670,11 @@ export function detectAdapter(ctx: unknown): AdapterProbe {
   }
 
   /** 真的重跑：让 controller 用新文本触发一次生成。 */
-  const promptSession = async (sessionId: string, text: string): Promise<{ ok: boolean; reason?: string }> => {
+  const promptSession = async (
+    sessionId: string,
+    text: string,
+    mode: 'queue' | 'steer' = 'queue',
+  ): Promise<{ ok: boolean; reason?: string }> => {
     const controller = serviceGet<{ prompt?: (...args: unknown[]) => unknown }>(ctx, 'sessionController')
     if (!controller || typeof controller.prompt !== 'function') {
       return {
@@ -598,7 +685,7 @@ export function detectAdapter(ctx: unknown): AdapterProbe {
     const request = {
       requestId: randomUUID(),
       sessionId,
-      mode: 'queue',
+      mode,
       content: [{ type: 'text', text }],
     }
     const call = await callWithReason<{ accepted?: unknown }>(controller, 'prompt', request, new AbortController().signal)

@@ -92,6 +92,20 @@ describe('applyBranch（分页重跑：先遮蔽，再重跑）', () => {
     expect(result.shadowed).toBe(true)
   })
 
+  it('queue 不落地时自动改用 steer（会话正忙时只有 steer 会立刻进去）', async () => {
+    // 真机现象：prompt() 返回 accepted 却没有消息落地 —— 会话正忙着（就是我自己
+    // 那一轮），queue 只能排队。steer 是往正在进行的回合里注入。
+    host.promptLands = false
+    host.landOnlyWith = 'steer'
+    host.shadows.length = 0
+    host.prompts.length = 0
+
+    const result = await controller.applyBranch({ sessionId: 'session-1', targetSeq: 3, text: 'x' })
+
+    expect(result.ok).toBe(true)
+    expect(host.prompts.map((entry) => entry.mode)).toEqual(['queue', 'steer'])
+  })
+
   it('prompt 落地了才算成功', async () => {
     host.promptLands = true
     host.shadows.length = 0

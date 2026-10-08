@@ -101,7 +101,7 @@ export class FakeHost implements HarnessAdapter {
   }
   /** 记录"分页重跑"两步，供控制器/路由测试断言（顺序与参数都要能验）。 */
   shadows: { sessionId?: string; plan: ShadowPlan; expectedSeq?: number }[] = []
-  prompts: { sessionId: string; text: string }[] = []
+  prompts: { sessionId: string; text: string; mode?: 'queue' | 'steer' }[] = []
   /** 规划结果；默认给一个可用的窗口，测试可以改成失败来验"什么都不做"。 */
   /** 有没有重跑能力；测试里可以关掉来验"连遮蔽都不做"。 */
   canPromptValue = true
@@ -131,9 +131,16 @@ export class FakeHost implements HarnessAdapter {
   shadowVerdict: { ok: boolean; reason?: string } = { ok: true }
   /** prompt 是否真的往日志里落了消息；关掉它来模拟"会话未激活"。 */
   promptLands = true
-  async promptSession(sessionId: string, text: string): Promise<{ ok: boolean; reason?: string }> {
-    this.prompts.push({ sessionId, text })
-    if (this.promptVerdict.ok && this.promptLands) {
+  /** 只在指定模式下才落地（模拟「正忙的会话只吃 steer」）。 */
+  landOnlyWith: 'queue' | 'steer' | null = null
+  async promptSession(
+    sessionId: string,
+    text: string,
+    mode: 'queue' | 'steer' = 'queue',
+  ): Promise<{ ok: boolean; reason?: string }> {
+    this.prompts.push({ sessionId, text, mode })
+    const lands = this.promptLands || this.landOnlyWith === mode
+    if (this.promptVerdict.ok && lands) {
       this.messages = [...this.messages, { seq: 9000 + this.messages.length, role: 'user', text }]
     }
     return this.promptVerdict
