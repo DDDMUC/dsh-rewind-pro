@@ -51,6 +51,9 @@ describe('applyBranch（分页重跑：先遮蔽，再重跑）', () => {
     host.promptSession = async (sessionId, text) => {
       calls.push('prompt')
       host.prompts.push({ sessionId, text })
+      // 真实宿主会把 requestId 持久化在**被接受的那条用户消息**上，
+      // 所以桩也必须让消息数增加，否则会被"没落地"的检查拦下。
+      host.messages = [...host.messages, { seq: 9000, role: 'user', text }]
       return { ok: true }
     }
 
@@ -73,6 +76,31 @@ describe('applyBranch（分页重跑：先遮蔽，再重跑）', () => {
     expect(result.reason).toContain('sessionController')
     expect(host.shadows).toHaveLength(0)
     expect(host.prompts).toHaveLength(0)
+  })
+
+  it('prompt 被接受但消息没落地（会话未激活）→ 如实报告，不返回成功', async () => {
+    // 真机上踩到过：prompt() 返回 accepted，但日志里一条消息都没多 ——
+    // 会话在宿主里不活动时就是这样。返回成功会让用户以为跑完了。
+    host.promptLands = false
+    host.shadows.length = 0
+    host.prompts.length = 0
+
+    const result = await controller.applyBranch({ sessionId: 'session-1', targetSeq: 3, text: 'x' })
+
+    expect(result.ok).toBe(false)
+    expect(result.reason).toContain('激活')
+    expect(result.shadowed).toBe(true)
+  })
+
+  it('prompt 落地了才算成功', async () => {
+    host.promptLands = true
+    host.shadows.length = 0
+    host.prompts.length = 0
+
+    const result = await controller.applyBranch({ sessionId: 'session-1', targetSeq: 3, text: 'x' })
+
+    expect(result.ok).toBe(true)
+    expect(host.prompts).toHaveLength(1)
   })
 
   it('目标不是 surface 节点时什么都不做（不写日志、不重跑）', async () => {
