@@ -283,6 +283,16 @@ export function createRewindController(deps: ControllerDeps): RewindController {
      * 遮蔽成功而重跑被拒时，`shadowed: true` 如实说明日志已经变了。
      */
     async applyBranch({ sessionId, targetSeq, text }) {
+      // 先确认"能重跑"再动手遮蔽：遮蔽成功而重跑失败会留下半完成状态
+      // （那段历史被遮掉、却没有新提示词补上），真机上踩过一次。
+      if (!adapter.canPrompt()) {
+        return {
+          ok: false,
+          reason: '宿主没有可用的 sessionController.prompt，已取消（没有写入任何遮蔽）',
+          shadowed: false,
+        }
+      }
+
       const planned = adapter.planShadowFor(targetSeq, sessionId)
       if (!planned.ok) return { ok: false, reason: planned.reason, shadowed: false }
 

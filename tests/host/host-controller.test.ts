@@ -62,6 +62,19 @@ describe('applyBranch（分页重跑：先遮蔽，再重跑）', () => {
     expect(host.prompts[0]).toEqual({ sessionId: 'session-1', text: '改写后的提示词' })
   })
 
+  it('没有重跑能力时**连遮蔽都不做** —— 半完成状态会把那段历史白遮掉（真机踩过）', async () => {
+    host.canPromptValue = false
+    host.shadows.length = 0
+    host.prompts.length = 0
+
+    const result = await controller.applyBranch({ sessionId: 'session-1', targetSeq: 3, text: 'x' })
+
+    expect(result.ok).toBe(false)
+    expect(result.reason).toContain('sessionController')
+    expect(host.shadows).toHaveLength(0)
+    expect(host.prompts).toHaveLength(0)
+  })
+
   it('目标不是 surface 节点时什么都不做（不写日志、不重跑）', async () => {
     host.planVerdict = { ok: false, reason: 'seq 9 is not a surface node' }
     host.shadows.length = 0

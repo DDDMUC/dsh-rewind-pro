@@ -103,6 +103,11 @@ export class FakeHost implements HarnessAdapter {
   shadows: { sessionId?: string; plan: ShadowPlan; expectedSeq?: number }[] = []
   prompts: { sessionId: string; text: string }[] = []
   /** 规划结果；默认给一个可用的窗口，测试可以改成失败来验"什么都不做"。 */
+  /** 有没有重跑能力；测试里可以关掉来验"连遮蔽都不做"。 */
+  canPromptValue = true
+  canPrompt(): boolean {
+    return this.canPromptValue
+  }
   planVerdict: { ok: true; plan: ShadowPlan; expectedSeq?: number } | { ok: false; reason: string } | null = null
   planShadowFor(
     targetSeq: number,
