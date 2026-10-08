@@ -71,6 +71,11 @@ export interface HarnessAdapter {
   canPatchDeriveMessages: () => boolean
   patchDeriveMessages: (ranges: HiddenRange[]) => Promise<boolean>
   canAppendSurfaceOp: (sessionId?: string) => boolean
+  /**
+   * 有没有真的重跑能力（`sessionController.prompt`）。
+   * 遮蔽之前必须先问这一句：遮蔽成功而重跑失败会留下半完成状态。
+   */
+  canPrompt: () => boolean
   appendSurfaceOp: (op: SurfaceOp, sessionId?: string) => Promise<boolean>
   /**
    * 遮蔽一个 surface 窗口（追加式日志的唯一改法：写一个带 replace 的替身事件）。
@@ -178,6 +183,47 @@ function safeCall<R>(holder: unknown, key: string, ...args: unknown[]): R | unde
 }
 
 /**
+ * 取一个**可选服务**：先 `ctx.get(name, false)`（不需要 inject 声明），再退回属性读取。
+ *
+ * 顺序不能反。cordis 4 对 inject 列表之外的属性读取**直接抛错**，而
+ * `safeGet` 只做属性读取 —— 真机上 `sessionController` 就是这么读不到的，
+ * 表现为遮蔽成功（`shadowed: true`）之后紧跟一句 "prompt unavailable"。
+ */
+function serviceGet<T>(ctx: unknown, name: string): T | undefined {
+  const getter = safeGet<(key: string, required?: boolean) => unknown>(ctx, 'get')
+  if (typeof getter === 'function') {
+    try {
+      const value = getter.call(ctx, name, false)
+      if (value !== undefined && value !== null) return value as T
+    } catch {
+      /* 落回属性读取 */
+    }
+  }
+  return safeGet<T>(ctx, name)
+}
+
+/**
+ * `safeCall` 的异步版，但**把错误原因带回来**。
+ *
+ * `prompt` 是 Promise：同步的 safeCall 会把"调用抛错"和"调用成功"混为一谈，
+ * 而"prompt rejected"这种笼统结论在真机上等于没有信息 —— 用户和排查的人都
+ * 需要知道原始错误（例如 "session is not active"）。
+ */
+async function callWithReason<R>(
+  holder: unknown,
+  key: string,
+  ...args: unknown[]
+): Promise<{ value?: R; error?: string }> {
+  const fn = safeGet<(...a: unknown[]) => Promise<R>>(holder, key)
+  if (typeof fn !== 'function') return { error: `${key} is not a function` }
+  try {
+    return { value: await fn.apply(holder, args) }
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/**
  * `safeCall` 的异步版：`prompt` 是 Promise，同步的 safeCall 会把它当成功，
  * 于是"调用抛错"和"调用成功"分不出来 —— 重跑必须能如实报告失败原因。
  */
@@ -207,6 +253,7 @@ export function createNullAdapter(notes: string[] = []): HarnessAdapter {
     canPatchDeriveMessages: () => false,
     patchDeriveMessages: async () => false,
     canAppendSurfaceOp: () => false,
+    canPrompt: () => false,
     appendSurfaceOp: async () => false,
     shadowWindow: async () => ({ ok: false, reason: 'sessions service unavailable' }),
     planShadowFor: () => ({ ok: false, reason: 'sessions service unavailable' }),
@@ -533,11 +580,20 @@ export function detectAdapter(ctx: unknown): AdapterProbe {
     return { ok: true, plan: planned.plan, expectedSeq }
   }
 
+  /** 有没有真的重跑能力。遮蔽之前先问这一句，避免"遮了却没重跑"的半完成状态。 */
+  const canPrompt = (): boolean => {
+    const controller = serviceGet<{ prompt?: unknown }>(ctx, 'sessionController')
+    return typeof controller?.prompt === 'function'
+  }
+
   /** 真的重跑：让 controller 用新文本触发一次生成。 */
   const promptSession = async (sessionId: string, text: string): Promise<{ ok: boolean; reason?: string }> => {
-    const controller = safeGet<{ prompt?: (...args: unknown[]) => unknown }>(ctx, 'sessionController')
+    const controller = serviceGet<{ prompt?: (...args: unknown[]) => unknown }>(ctx, 'sessionController')
     if (!controller || typeof controller.prompt !== 'function') {
-      return { ok: false, reason: 'sessionController.prompt unavailable' }
+      return {
+        ok: false,
+        reason: 'sessionController.prompt unavailable（已尝试 ctx.get("sessionController", false) 与属性读取）',
+      }
     }
     const request = {
       requestId: randomUUID(),
@@ -545,8 +601,9 @@ export function detectAdapter(ctx: unknown): AdapterProbe {
       mode: 'queue',
       content: [{ type: 'text', text }],
     }
-    const value = await safeCallAsync<{ accepted?: unknown }>(controller, 'prompt', request, new AbortController().signal)
-    if (value === undefined) return { ok: false, reason: 'prompt rejected' }
+    const call = await callWithReason<{ accepted?: unknown }>(controller, 'prompt', request, new AbortController().signal)
+    if (call.error !== undefined) return { ok: false, reason: `prompt 调用失败：${call.error}` }
+    if (call.value === undefined) return { ok: false, reason: 'prompt rejected' }
     return { ok: true }
   }
 
@@ -576,6 +633,7 @@ export function detectAdapter(ctx: unknown): AdapterProbe {
     // Whether a specific append works is decided at call time, where a real
     // session exists and a rejection is a plain `false`.
     canAppendSurfaceOp: () => Boolean(sessions),
+    canPrompt,
     shadowWindow,
     planShadowFor,
     promptSession,

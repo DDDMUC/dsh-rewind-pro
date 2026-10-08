@@ -186,6 +186,52 @@ describe('rerun prompt（分页重跑的第二步：真的重跑）', () => {
     expect(typeof request?.requestId).toBe('string')
   })
 
+  it('服务必须经 ctx.get(name, false) 取 —— 直接读属性在 cordis 4 上会抛错（真机踩过）', async () => {
+    // 真实 cordis ctx：未在 inject 列表里的属性读取**直接抛错**。
+    // 之前那条用例用的是普通对象（属性读得到），所以完全抓不住这个 bug ——
+    // 真机上的表现就是 shadowed:true 之后紧跟一句 "sessionController.prompt unavailable"。
+    const calls: unknown[] = []
+    const sessionController = {
+      prompt: (request: unknown) => {
+        calls.push(request)
+        return Promise.resolve({ accepted: true })
+      },
+    }
+    const ctx = {
+      get sessionController(): never {
+        throw new Error('cannot get property sessionController without inject')
+      },
+      get: (name: string) => (name === 'sessionController' ? sessionController : undefined),
+      sessions: { list: () => [], get: () => undefined },
+    }
+
+    const probe = detectAdapter(ctx)
+    const result = await probe.adapter.promptSession('session-1', '甲改')
+
+    expect(result.ok).toBe(true)
+    expect(calls).toHaveLength(1)
+  })
+
+  it('prompt 抛错时把**原始错误**带出来（否则下次失败又是一句笼统的话）', async () => {
+    const ctx = {
+      get: (name: string) =>
+        name === 'sessionController'
+          ? {
+              prompt: () => {
+                throw new Error('session is not active')
+              },
+            }
+          : undefined,
+      sessions: { list: () => [], get: () => undefined },
+    }
+
+    const probe = detectAdapter(ctx)
+    const result = await probe.adapter.promptSession('session-1', '甲改')
+
+    expect(result.ok).toBe(false)
+    expect(result.reason).toContain('session is not active')
+  })
+
   it('没有 sessionController 时如实失败，不假装成功', async () => {
     const probe = detectAdapter({ sessions: { list: () => [], get: () => undefined } })
 
