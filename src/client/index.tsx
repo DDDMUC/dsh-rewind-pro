@@ -22,6 +22,7 @@ import { HistoryPanel } from './history-panel.js'
 import { SettingsCard } from './settings-card.js'
 import { ImpactPopover } from './popover.js'
 import { apiPath, branchFailureReason, postJson } from './contract.js'
+import { promptViaClientSessions } from './client-prompt.js'
 import type { CandidatesResponse, SessionView, UndoResponse } from './contract.js'
 import type { Capability, ImpactPlan, PluginConfig, RewindCandidate } from '../core/types.js'
 
@@ -390,12 +391,26 @@ export function apply(ctx: ClientContext, injectedConfig?: Partial<PluginConfig>
       return index >= 0 ? (seqs[index] ?? null) : null
     },
     applyBranch: async ({ seq, text }) => {
-      const result = await postJson<{ error?: string }>(
+      const result = await postJson<{ error?: string; shadowed?: boolean }>(
         '/branch/apply',
         { sessionId: sessionIdOf(), targetSeq: seq, text },
         config.apiPrefix ? { prefix: config.apiPrefix } : {},
       )
       if (result.ok) return { ok: true }
+
+      // 宿主的 prompt 在这个部署下是**惰性**的（日志实证：返回 accepted 却一条事件
+      // 都不写；queue/steer 都一样）。所以只要遮蔽已经落地（shadowed: true），
+      // 就由**客户端**走界面同一条路把提示词发出去 —— 界面自己发的消息都正常落地。
+      if (result.data?.shadowed === true) {
+        const sessionsService = typeof ctx.get === 'function' ? ctx.get('sessions') : undefined
+        const sent = await promptViaClientSessions(sessionsService, sessionIdOf(), text)
+        if (sent.ok) return { ok: true }
+        return {
+          ok: false,
+          reason: `遮蔽已生效，但重跑没能发出去：${sent.reason ?? '未知原因'}`,
+        }
+      }
+
       // 失败原因要能指导下一步：404 意味着"宿主半还没重新加载"，不是"被拒绝"
       return { ok: false, reason: branchFailureReason(result.status, result.data?.error) }
     },
