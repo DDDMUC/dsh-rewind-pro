@@ -229,7 +229,9 @@ describe('版本树翻页器', () => {
     expect(pagerIn(userRows()[0])?.querySelector('[title="上一条输入版本"]')).toBeNull()
     expect(pagerIn(userRows()[0])?.querySelector('[title="上一条回复版本"]')).toBeNull()
     expect(pagerIn(userRows()[0])?.querySelector('button[aria-label="编辑"]')).not.toBeNull()
-    expect(pagerIn(userRows()[0])?.querySelector('button[aria-label="重跑"]')).not.toBeNull()
+    // 圆弧箭头（行内重跑）已按要求去掉：它只做本地版本分页，容易和"真的重跑"混淆，
+    // 真正会动会话的是编辑器里的【分页重跑】。
+    expect(pagerIn(userRows()[0])?.querySelector('button[aria-label="重跑"]')).toBeNull()
   })
 
   it('编辑开新输入版本：新输入没有回复，后缀行消失；翻回去它们回来', () => {
@@ -251,18 +253,24 @@ describe('版本树翻页器', () => {
     expect(visible(assistantRows()[1])).toBe(true)
   })
 
-  it('重跑开新回复版本：后缀行消失；翻回旧回复它们回来', () => {
+  it('分页重跑仍会给这条回复开新版本：后缀行消失；翻回旧版本它们回来', () => {
+    // 行内的圆弧箭头去掉了，但"开新版本 + 后缀隐藏"这件事没丢 —— 它现在只从
+    // 编辑器里的【分页重跑】发生（没接宿主通道时退回纯本地分页）。
     const pager = mount()
 
-    buttonByTitle(userRows()[0], '给这条回复再生成一个版本（新分支）')?.click()
+    editViaTop(userRows()[0], '甲问改')
     pager.refresh()
 
-    expect(countIn(userRows()[0], '回复')).toBe('2/2')
+    // 新输入版本成为当前：输入链 2 个，且第二轮整条隐藏。
+    // 新输入只有 1 个回复版本，所以**不该**出现回复翻页器（单版本不占位）。
+    expect(countIn(userRows()[0], '输入')).toBe('2/2')
+    expect(countIn(userRows()[0], '回复')).toBeNull()
     expect(visible(userRows()[1])).toBe(false)
 
-    buttonByTitle(userRows()[0], '上一条回复版本')?.click()
+    // 翻回旧输入版本 → 后缀行回来
+    buttonByTitle(userRows()[0], '上一条输入版本')?.click()
     pager.refresh()
-    expect(countIn(userRows()[0], '回复')).toBe('1/2')
+    expect(countIn(userRows()[0], '输入')).toBe('1/2')
     expect(visible(userRows()[1])).toBe(true)
     expect(visible(assistantRows()[1])).toBe(true)
   })
