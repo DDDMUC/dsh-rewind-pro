@@ -97,8 +97,17 @@ export function createRewindApi(deps: ApiDeps): RewindApi {
       case 'GET /state':
         return json(200, controller.state(sid))
 
-      case 'GET /candidates':
-        return json(200, { candidates: controller.candidates(sid) })
+      case 'GET /candidates': {
+        // limit 只影响本次请求拿到的条数；默认口径（20，回退列表的 UX 依赖它）不变。
+        // 注意 `query.get('limit')` 缺省时是 null，而 `Number(null) === 0` 是有限数 ——
+        // 直接 Number() 会把默认口径夹成 1 条（踩过）。
+        const rawLimit = query.get('limit')
+        const parsedLimit = rawLimit === null ? Number.NaN : Number(rawLimit)
+        const limit = Number.isFinite(parsedLimit)
+          ? Math.min(1000, Math.max(1, Math.trunc(parsedLimit)))
+          : undefined
+        return json(200, { candidates: controller.candidates(sid, limit) })
+      }
 
       case 'GET /plan': {
         const targetSeq = Number(query.get('targetSeq'))

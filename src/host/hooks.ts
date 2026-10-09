@@ -74,7 +74,11 @@ export interface RewindController {
   workspaceRoot: string
   capability: () => Capability
   state: (sessionId: string) => SessionView
-  candidates: (sessionId: string) => RewindCandidate[]
+  /**
+   * 候选列表。默认 20 条（回退列表的 UX 依赖这个口径）；
+   * 定位很老的消息时需要更宽 —— 调用方可以指定 limit。
+   */
+  candidates: (sessionId: string, limit?: number) => RewindCandidate[]
   impact: (sessionId: string, targetSeq: number) => ImpactPlan | null
   mark: (input: { sessionId: string; targetSeq: number }) => Promise<ActionResult>
   /**
@@ -270,7 +274,7 @@ export function createRewindController(deps: ControllerDeps): RewindController {
 
     state: viewOf,
 
-    candidates: (sessionId) => listCandidates(adapter.messagesOf(sessionId)),
+    candidates: (sessionId, limit) => listCandidates(adapter.messagesOf(sessionId), limit),
 
     impact: (sessionId, targetSeq) => {
       if (!messageAt(targetSeq, sessionId)) return null
