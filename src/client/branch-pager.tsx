@@ -58,7 +58,8 @@ export interface BranchPagerOptions {
   /** 编辑时向用户要新文本；默认用 prompt，测试里可注入。 */
   askText?: (current: string) => string | null
   /** 把一行定位到会话日志里的 seq；拿不准就返回 null（猜 seq 会改错消息）。 */
-  seqOfRow?: (row: HTMLElement) => number | null
+  /** 把一行定位到会话日志里的 seq；拿不准就返回 null，或返回具体原因。 */
+  seqOfRow?: (row: HTMLElement) => number | null | { reason: string }
   /** 真的改提示词 + 真的重跑（走宿主路由）。不提供就退回纯本地分页。 */
   applyBranch?: (input: { seq: number; text: string }) => Promise<{ ok: boolean; reason?: string }>
 }
@@ -448,6 +449,10 @@ export function mountBranchPager(options: BranchPagerOptions): BranchPagerHandle
       return { ok: true }
     }
     const seq = seqOf(row)
+    // 定位失败分两种：null（对不上，含糊）和带 reason（知道为什么，例如"这条太早"）。
+    if (seq !== null && typeof seq === 'object') {
+      return { ok: false, reason: seq.reason }
+    }
     if (seq === null) {
       return { ok: false, reason: '定位不到这条消息在会话日志里的位置，已取消（没有做任何改动）。' }
     }

@@ -388,7 +388,19 @@ export function apply(ctx: ClientContext, injectedConfig?: Partial<PluginConfig>
       const found = findAnchors(document, DEFAULT_USER_SELECTORS)
       const seqs = resolveAnchorSeqs(found, candidates)
       const index = found.findIndex((anchor) => anchor.element === row)
-      return index >= 0 ? (seqs[index] ?? null) : null
+      const resolved = index >= 0 ? (seqs[index] ?? null) : null
+      if (resolved !== null) return resolved
+
+      // 定位失败要说清**为什么**。宿主只给"最近 N 条用户消息"作为候选，
+      // 比这个窗口更早的消息，宿主那边根本没有它的 seq —— 那是"太早"，
+      // 不是"文本对不上"，两者的下一步动作完全不同。
+      const distanceFromEnd = index >= 0 ? found.length - 1 - index : Number.POSITIVE_INFINITY
+      if (distanceFromEnd >= candidates.length) {
+        return {
+          reason: `这条消息太早，超出了宿主能定位的范围（只覆盖最近的 ${String(candidates.length)} 条用户消息）。请对较新的消息使用分页重跑。`,
+        }
+      }
+      return null
     },
     applyBranch: async ({ seq, text }) => {
       const result = await postJson<{ error?: string; shadowed?: boolean }>(

@@ -72,6 +72,21 @@ describe('分页重跑接宿主（真的改提示词 + 真的重跑）', () => {
 
   const errorText = (): string => document.querySelector('.dshet-error')?.textContent?.trim() ?? ''
 
+  it('定位不到时把**具体原因**显示出来（例如「这条太早，超出宿主能定位的范围」）', async () => {
+    // 真机上踩过：用户点了会话最早的一条消息，而宿主只给最近 20 条候选，
+    // 于是定位不到。这时必须说清是"太早"，而不是笼统一句"定位不到"。
+    mountWith({
+      seqOfRow: () => ({ reason: '这条消息太早，超出了宿主能定位的范围（只覆盖最近的 20 条用户消息）。' }),
+      applyBranch: async () => ({ ok: true }),
+    })
+
+    editViaTop(userRows()[0], '甲问改')
+    await tick()
+
+    expect(errorText()).toContain('太早')
+    expect(document.querySelector('.dshet-editor')).not.toBeNull()
+  })
+
   it('成功：先把行定位成 seq，再带新文本调用宿主；成功才关编辑器', async () => {
     const calls: { seq: number; text: string }[] = []
     mountWith({
