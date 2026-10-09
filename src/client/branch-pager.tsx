@@ -348,7 +348,7 @@ export function mountBranchPager(options: BranchPagerOptions): BranchPagerHandle
       if (replyStepper) pager.append(replyStepper)
 
       const foreignEdit = hasForeignEditAction(row)
-      const editButton = action(doc, '编辑', () => {
+      const editButton = action(doc, () => {
         // 它的插件在场时**绝不开我自己的编辑器**：它的 clearEditor() 会按类名把
         // 页面上任何 .dshet-editor 删掉（源码实测如此），我的编辑器会被无声吞掉。
         // 那种情况下我的功能走它的编辑器页脚（见 bridgeForeignEditor）。
@@ -365,14 +365,8 @@ export function mountBranchPager(options: BranchPagerOptions): BranchPagerHandle
       // 它那支笔在场时我让位：一行动作只留一支笔，我的功能改由它的编辑器页脚承载。
       if (foreignEdit) editButton.style.display = 'none'
 
-      pager.append(
-        editButton,
-        action(doc, '重跑', () => {
-          model = rerunReply(model, turnId, '')
-          save()
-          refresh()
-        }),
-      )
+      // 行里只留这一支笔（圆弧箭头已按要求去掉）
+      pager.append(editButton)
     }
   }
 
@@ -559,16 +553,19 @@ const PENCIL_MARKUP =
   ).join('') +
   '</svg>'
 
-function action(doc: Document, label: '编辑' | '重跑', onPick: () => void): HTMLElement {
+/**
+ * 行里唯一的动作：**笔**（打开编辑器，编辑器里有【分页重跑】）。
+ *
+ * 原先这里还有一个圆弧箭头（行内"重跑"），已按要求去掉：它只在我自己的版本树里
+ * 加一个版本、**不碰会话**，和编辑器里那个"真的会动会话"的【分页重跑】容易混淆。
+ */
+function action(doc: Document, onPick: () => void): HTMLElement {
   const button = doc.createElement('button')
   button.type = 'button'
   button.className = `dsh-rewind-pro-btn ${PAGER_CLASS}-btn`
-  button.innerHTML =
-    label === '编辑'
-      ? PENCIL_MARKUP
-      : '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13.2 8.6A5.2 5.2 0 1 1 11.3 4"/><path d="M13.4 2.4v2.8h-2.8"/></svg>'
-  button.title = label === '编辑' ? '以这条为起点开一个新输入版本' : '给这条回复再生成一个版本（新分支）'
-  button.setAttribute('aria-label', label)
+  button.innerHTML = PENCIL_MARKUP
+  button.title = '以这条为起点开一个新输入版本'
+  button.setAttribute('aria-label', '编辑')
   button.addEventListener('click', (event) => {
     event.preventDefault()
     event.stopPropagation()
