@@ -48,6 +48,22 @@ describe('routing', () => {
     expect((await call('GET', '/nope')).status).toBe(404)
   })
 
+  it('候选可以按需放宽（定位老消息要更宽的窗口；回退列表仍用默认 20）', async () => {
+    // 造 25 条用户消息：默认口径只给最新 20 条，放宽后必须能看到全部 25 条。
+    // （弱断言踩过：只比 ">="，参数被忽略时也成立，等于没测。）
+    host.messages = Array.from({ length: 25 }, (_, index) => ({
+      seq: index + 1,
+      role: 'user' as const,
+      text: `问 ${String(index + 1)}`,
+    }))
+
+    const narrow = await call('GET', '/api/dsh-rewind-pro/candidates?sessionId=session-1')
+    const wide = await call('GET', '/api/dsh-rewind-pro/candidates?sessionId=session-1&limit=500')
+
+    expect((narrow.body as { candidates: unknown[] }).candidates).toHaveLength(20)
+    expect((wide.body as { candidates: unknown[] }).candidates).toHaveLength(25)
+  })
+
   it('rejects an unsafe session id instead of touching the disk', async () => {
     const res = await call('GET', '/api/dsh-rewind-pro/state?sessionId=../../etc')
     expect(res.status).toBe(400)

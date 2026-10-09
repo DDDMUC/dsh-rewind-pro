@@ -300,6 +300,14 @@ export function apply(ctx: ClientContext, injectedConfig?: Partial<PluginConfig>
   // store moves (SSE from another tab, or one of our own actions), which is
   // also when new user turns can appear.
   let candidates: RewindCandidate[] = []
+  /**
+   * 给"定位 seq"用的**更宽**候选。
+   *
+   * `/candidates` 默认只给最近 20 条（回退列表的口径，不能动）；但用户可能在
+   * 很老的一条消息上点【分页重跑】，那时 20 条窗口根本盖不到它 —— 客户端会
+   * 如实拒绝（"这条消息太早"）。所以这里单独再取一份宽的，只用于定位。
+   */
+  let seqCandidates: RewindCandidate[] = []
   let buttons: RewindButtonLayerHandle | null = null
   /** 版本树翻页器（输入/回复各自翻页；切版本靠行可见性）。 */
   let pager: BranchPagerHandle | null = null
@@ -315,6 +323,17 @@ export function apply(ctx: ClientContext, injectedConfig?: Partial<PluginConfig>
     pager?.refresh()
     } catch {
       /* offline: keep the last known candidates */
+    }
+    // 宽窗口单独取：失败就沿用旧的（定位会退回窄窗口，仍然安全，只是能覆盖的更少）
+    try {
+      const wide = await transport.fetch(
+        apiPath('/candidates', { sessionId: sessionIdOf(), limit: '500' }, config.apiPrefix),
+      )
+      if (!wide.ok) return
+      const body = (await wide.json()) as CandidatesResponse
+      if (Array.isArray(body?.candidates)) seqCandidates = body.candidates
+    } catch {
+      /* 保持上一次的宽窗口 */
     }
   }
 
@@ -385,8 +404,10 @@ export function apply(ctx: ClientContext, injectedConfig?: Partial<PluginConfig>
   pager = mountBranchPager({
     sessionId: sessionIdOf,
     seqOfRow: (row) => {
+      // 定位用**宽窗口**（回退列表仍是 20 条口径）
+      const pool = seqCandidates.length > 0 ? seqCandidates : candidates
       const found = findAnchors(document, DEFAULT_USER_SELECTORS)
-      const seqs = resolveAnchorSeqs(found, candidates)
+      const seqs = resolveAnchorSeqs(found, pool)
       const index = found.findIndex((anchor) => anchor.element === row)
       const resolved = index >= 0 ? (seqs[index] ?? null) : null
       if (resolved !== null) return resolved
@@ -395,9 +416,9 @@ export function apply(ctx: ClientContext, injectedConfig?: Partial<PluginConfig>
       // 比这个窗口更早的消息，宿主那边根本没有它的 seq —— 那是"太早"，
       // 不是"文本对不上"，两者的下一步动作完全不同。
       const distanceFromEnd = index >= 0 ? found.length - 1 - index : Number.POSITIVE_INFINITY
-      if (distanceFromEnd >= candidates.length) {
+      if (distanceFromEnd >= pool.length) {
         return {
-          reason: `这条消息太早，超出了宿主能定位的范围（只覆盖最近的 ${String(candidates.length)} 条用户消息）。请对较新的消息使用分页重跑。`,
+          reason: `这条消息太早，超出了宿主能定位的范围（只覆盖最近的 ${String(pool.length)} 条用户消息）。请对较新的消息使用分页重跑。`,
         }
       }
       return null
