@@ -7,28 +7,41 @@ import { describe, expect, it } from 'vitest'
 import { SupersededRegistry } from '../../src/core/active-path'
 import { installMessageProjections, type ProjectionVerdict } from '../../src/host/projection'
 
-/** 假宿主：可以指定哪些类型被别的插件占用了（注册即抛错）。 */
+/** 假宿主：方法**读 this**（和真宿主一样：内部用 this.projections 判重）。 */
 function fakeSessions(taken: readonly string[] = []) {
-  const registered: string[] = []
-  const sessions = {
-    registerMessageProjection: (projection: { type: string }) => {
-      if (taken.includes(projection.type)) {
+  class FakeStore {
+    projections: { type: string }[] = []
+    registerMessageProjection(projection: { type: string }): () => Promise<void> {
+      // 故意用 this：裸调（this 丢失）必须在这条用例里现形
+      if (this.projections.some((item) => item.type === projection.type)) {
         throw new Error(`session message projection "${projection.type}" is already registered`)
       }
-      registered.push(projection.type)
+      this.projections.push(projection)
       return () => Promise.resolve()
-    },
+    }
   }
-  return { sessions, registered }
+  const store = new FakeStore()
+  // 预先占用：模拟"别的插件已经注册了这些类型"
+  for (const type of taken) store.projections.push({ type })
+  return { sessions: store, registered: store.projections }
 }
 
 describe('installMessageProjections', () => {
-  it('三类全部注册成功 → ready=true', () => {
+  it('三类全部注册成功 → ready=true（且方法必须绑定 this 调用）', () => {
     const { sessions, registered } = fakeSessions()
     const verdict = installMessageProjections(sessions, new SupersededRegistry())
     expect(verdict.ready).toBe(true)
-    expect(registered.sort()).toEqual(['assistant/message', 'tool/result', 'user/message'])
+    expect(registered.map((item) => item.type).sort()).toEqual(['assistant/message', 'tool/result', 'user/message'])
     expect(verdict.skipped).toEqual([])
+  })
+
+  it('裸调方法会丢 this —— 宿主持内部读 this.projections，丢 this 就必须报出来', () => {
+    // 真机上踩过：把方法取出来再调用，this 变成 undefined，宿主内部
+    // "Cannot read properties of undefined (reading 'projections')" 然后被
+    // 我的 try/catch 吞成"跳过"。这条用例保证它永远不会再发生。
+    const { sessions } = fakeSessions()
+    const method = sessions.registerMessageProjection
+    expect(() => (method as (p: unknown) => unknown).call(undefined, { type: 'user/message' })).toThrow()
   })
 
   it('有一类被别的插件占用 → 那一类跳过，且**整体不启用**', () => {
@@ -36,7 +49,8 @@ describe('installMessageProjections', () => {
     const { sessions, registered } = fakeSessions(['assistant/message'])
     const verdict = installMessageProjections(sessions, new SupersededRegistry())
     expect(verdict.ready).toBe(false)
-    expect(registered.sort()).toEqual(['tool/result', 'user/message'])
+    expect(verdict.installed.sort()).toEqual(['tool/result', 'user/message'])
+    // 被占用那个必须报出宿主原话，否则没人知道为什么没装上
     expect(verdict.skipped).toHaveLength(1)
     expect(verdict.skipped[0]?.type).toBe('assistant/message')
     expect(verdict.skipped[0]?.reason).toContain('already registered')

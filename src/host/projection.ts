@@ -55,7 +55,10 @@ export function installMessageProjections(sessions: unknown, registry: Supersede
 
   for (const projection of createMessageProjections(registry)) {
     try {
-      callRegister(projection)
+      // **必须绑定 this 调用**：宿主持内部读 `this.projections` 判重。把方法取出来
+      // 裸调会让 this 变成 undefined，然后被我的 try/catch 吞成"跳过"——
+      // 真机上就这么静默失败过（三类全跳过、ready=false，却看不出原因）。
+      callRegister.call(sessions, projection)
       installed.push(projection.type)
     } catch (error) {
       skipped.push({ type: projection.type, reason: error instanceof Error ? error.message : String(error) })
