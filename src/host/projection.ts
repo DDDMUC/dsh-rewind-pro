@@ -9,6 +9,22 @@
 //      further derivation"，所以这里只注册、绝不调用 disposer。
 //   4. **注册失败绝不影响插件其余部分**：每一次注册都单独 try，错误进 verdict。
 
+// 活动路径投影 —— **结论：这条路对消息类型是死的，本模块不再被启动路径调用。**
+//
+// 用宿主自己导出的 `foldSurface` 实测（tests/host/host-active-path-integration.test.ts）：
+// 投影路径 `plan.kind === 'project'` 只写 `projectedMessages`，**不把 seq 加进
+// `state.nodes`**（surface.js 的 applySurfacePlan）。而 user/message 这类事件本来
+// 就走 `kind: 'append'` 分支把自己加进 nodes；一旦注册投影，就走 project 分支，
+// 于是**整条消息从派生历史里消失** —— 不是"只删我点名的那条"，是全都没了。
+//
+// 投影机制真正服务的对象是"插件自有、没有内置追加路径"的事件类型
+// （MESSAGE_PROJECTION_EVENT_TYPES = { image/offload }，由 dsh-compaction-image-offload
+// 提供解释器）。对那类类型，没有投影宿主会直接抛错。
+//
+// 所以：本模块的注册函数保留（供那类自有类型使用），但**不**再对消息类型注册；
+// /health 会把 activePath.ready 报成 false，明确说明"没在用"。
+// "翻页只改指针"要落地，剩下的路是：遮蔽 + 重放，或自己驱动模型调用。
+
 import { createMessageProjections, PROJECTED_TYPES, SupersededRegistry } from '../core/active-path.js'
 
 /** 一次注册的结果：装上了什么、跳过了什么、能不能开始隐藏。 */
@@ -30,9 +46,11 @@ let verdict: ProjectionVerdict | null = null
 export const projectionVerdict = (): ProjectionVerdict | null => verdict
 
 /**
- * 注册三类消息投影。永不抛错 —— 注册不上的确是可运行降级状态。
+ * 注册三类消息投影。**仅供插件自有类型使用，不要再对 user/message /
+ * assistant/message / tool/result 调用**（原因见文件头：会把这些消息整条
+ * 从派生历史里删掉）。永不抛错 —— 注册不上是可运行降级状态。
  *
- * @param sessions - 宿主 `ctx.sessions`（在我的 inject 列表里，直接可用）。
+ * @param sessions - 宿主 `ctx.sessions`。
  */
 export function installMessageProjections(sessions: unknown, registry: SupersededRegistry): ProjectionVerdict {
   const installed: string[] = []

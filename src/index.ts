@@ -20,7 +20,6 @@ import type { AdapterProbe } from './host/adapter.js'
 import { createRewindController } from './host/hooks.js'
 import type { RewindController } from './host/hooks.js'
 import { createRewindApi, DEFAULT_PREFIX } from './host/api.js'
-import { installMessageProjections, supersededRegistry } from './host/projection.js'
 import { registerCommands } from './host/commands.js'
 
 export const name = 'rewind-pro'
@@ -225,12 +224,15 @@ export function apply(ctx: HostContext, injectedConfig?: unknown): void {
     const probe = detectAdapter(ctx)
     if (config.debug) log.info?.(`[rewind-pro] adapter bound=${probe.bound} ${probe.notes.join('; ')}`)
 
-    // 活动路径投影：让模型只看到当前选中的那条链（派生层过滤，不写日志）。
-    // 常驻注册 —— 宿主注明"注销会让用过它的会话拒绝继续派生"，所以只登记、不注销。
-    const projectionState = installMessageProjections(safeGet(ctx, 'sessions'), supersededRegistry)
-    if (config.debug) {
-      log.info?.(`[rewind-pro] projections installed=[${projectionState.installed.join(',')}] ready=${String(projectionState.ready)}`)
-    }
+    // 活动路径投影**已停用**：宿主自己的 foldSurface 证明，投影路径
+    // （plan.kind === 'project'）不会把 seq 加进 surface 节点 —— 对
+    // user/message 这类本来就走"追加"路径的事件类型，注册投影会让它们
+    // **整条从派生历史里消失**（集成测试 host-active-path-integration.test.ts
+    // 用宿主导出的 foldSurface 实测过）。投影机制只适合"插件自有、没有内置
+    // 追加路径"的类型（如 image/offload）。
+    // 所以这里不再注册任何投影；纯逻辑留在 core/active-path.ts 供日后复用，
+    // /health 会把 activePath.ready 报成 false，明确说明"没在用"。
+    if (config.debug) log.info?.('[rewind-pro] active-path projection 未启用（见 core/active-path.ts 的结论注释）')
 
     const controller = createRewindController({
       adapter: probe.adapter,
