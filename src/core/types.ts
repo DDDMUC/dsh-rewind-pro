@@ -110,11 +110,15 @@ export interface MessageLite {
   toolCalls?: ToolCallLite[]
   /** Steering / interruption message injected mid-turn. */
   steering?: boolean
+  /** 稳定消息 id（user/message 在 data.id）—— 投影点名用；取不到就 undefined。 */
+  id?: string
 }
 
 /** One selectable rewind target for the /rewind candidate list. */
 export interface RewindCandidate {
   seq: number
+  /** 稳定消息 id（活动路径投影点名用；老会话取不到时没有这个字段）。 */
+  id?: string
   preview: string
   /** 1-based position from oldest to newest, for stable keyboard navigation. */
   ordinal: number

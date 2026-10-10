@@ -32,6 +32,7 @@ export function listCandidates(messages: readonly MessageLite[], limit = 20): Re
     .reverse()
     .map((message) => ({
       seq: message.seq,
+      ...(message.id === undefined ? {} : { id: message.id }),
       preview: normalizePreview(message.text),
       ordinal: ordinalOf.get(message.seq) ?? 0,
     }))

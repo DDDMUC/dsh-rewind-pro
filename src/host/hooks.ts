@@ -18,6 +18,8 @@ import { createCapabilityCache } from '../core/capability.js'
 import { createLedgerStore } from '../core/ledger-store.js'
 import { mergeRanges, replayDetail } from '../core/ledger.js'
 import { listCandidates, planRewind } from '../core/plan.js'
+import { expandToTurns } from '../core/active-path.js'
+import { supersededRegistry } from './projection.js'
 import { gradeUndo } from '../core/undo-policy.js'
 import { buildSurfaceOp } from '../core/strategy-surface.js'
 import type { CapabilityProbe } from '../core/capability.js'
@@ -88,6 +90,13 @@ export interface RewindController {
    * 两步顺序不可颠倒：先遮蔽再重跑，历史里才会只有一条提示词。反过来会把新
    * 提示词追加到还没遮蔽的旧历史后面，模型会看到两份。
    */
+  /**
+   * 登记「被顶掉的版本」：客户端上报**用户消息 id**，这里按日志展开成整回合，
+   * 再写进投影登记表。之后模型看到的派生历史就不再包含它们。
+   */
+  /** 模型真正看到的历史（验证用：登记前后 count 应当变）。 */
+  derived: (sessionId: string) => { count: number; first: string; last: string } | null
+  supersede: (input: { sessionId: string; ids: readonly string[] }) => { ok: boolean; reason?: string; expanded?: number }
   applyBranch: (input: {
     sessionId: string
     targetSeq: number
@@ -275,6 +284,23 @@ export function createRewindController(deps: ControllerDeps): RewindController {
     state: viewOf,
 
     candidates: (sessionId, limit) => listCandidates(adapter.messagesOf(sessionId), limit),
+
+    /** 模型真正看到的历史（验证用：登记前后 count 应当变）。 */
+    derived: (sessionId) => adapter.derivedOf(sessionId),
+
+    supersede({ sessionId, ids }) {
+      // 客户端上报的是「用户消息 id」；这里按日志展开成整回合 —— 否则只剩提问消失、
+      // 回复变成孤儿。空数组 = 这个会话恢复完整历史。
+      const wanted = ids.filter((id) => typeof id === 'string' && id !== '')
+      if (wanted.length === 0) {
+        supersededRegistry.clear(sessionId)
+        return { ok: true, expanded: 0 }
+      }
+      const expanded = expandToTurns(adapter.eventsOf(sessionId), wanted)
+      if (expanded.length === 0) return { ok: false, reason: 'no user message matched the reported ids' }
+      supersededRegistry.set(sessionId, expanded)
+      return { ok: true, expanded: expanded.length }
+    },
 
     impact: (sessionId, targetSeq) => {
       if (!messageAt(targetSeq, sessionId)) return null
