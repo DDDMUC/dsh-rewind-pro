@@ -123,6 +123,39 @@ describe('planSwitch', () => {
     expect(starts).toEqual([3, 4, 5])
   })
 
+  it('【回归】切回到"已被遮蔽过"的目标：必须把缺失的消息重放出去', () => {
+    // 真机上踩过：目标是当前 surface 的**超集**（那些消息早先被遮蔽、已不在 surface
+    // 上），旧代码在"没有分歧"分支直接 return 空写入 → "切回去"什么都不发生。
+    // 现场：先把 3..6（乙问/答乙/乙问改/答乙改）整段遮蔽掉
+    const cut: PlanEvent[] = [
+      ...LOG,
+      {
+        seq: 7,
+        type: 'system/message',
+        surfaceOp: { op: 'replace', startSeq: 3, endSeq: 6 },
+        sourceEventSeqs: [3, 4, 5, 6],
+        data: { message: { id: 'c1', role: 'system', content: [] } },
+      },
+    ]
+    counter = 0
+    // surface = [0,1,2,7]，全部在目标上 → 没有要遮蔽的；但 u2/a2 已不在 surface 上
+    const plan = planSwitch({
+      events: cut,
+      nodes: [0, 1, 2, 7],
+      targetIds: ['sys', 'u1', 'a1', 'u2', 'a2'],
+      maxTurn: 3,
+      mint,
+    })
+    expect(plan.ok).toBe(true)
+    if (!plan.ok) return
+    expect(plan.shadowed).toBe(0) // 没有分歧，不需要遮蔽
+    expect(plan.replayed).toBe(2) // u2/a2 必须被重放回来
+    expect(plan.writes.map((write) => write.type)).toEqual([
+      'turn/start', 'user/message', 'turn/end',
+      'turn/start', 'assistant/message', 'turn/end',
+    ])
+  })
+
   it('idOf：user 取 data.id，assistant 取 data.message.id', () => {
     expect(idOf(user(1, 'u1', 'x'))).toBe('u1')
     expect(idOf(assistant(2, 'a1', 'x'))).toBe('a1')
