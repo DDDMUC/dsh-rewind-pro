@@ -19,6 +19,7 @@ import { createLedgerStore } from '../core/ledger-store.js'
 import { mergeRanges, replayDetail } from '../core/ledger.js'
 import { listCandidates, planRewind } from '../core/plan.js'
 import { expandToTurns } from '../core/active-path.js'
+import { planSwitch } from '../core/replay-plan.js'
 import { supersededRegistry } from './projection.js'
 import { gradeUndo } from '../core/undo-policy.js'
 import { buildSurfaceOp } from '../core/strategy-surface.js'
@@ -96,7 +97,13 @@ export interface RewindController {
    */
   /** 模型真正看到的历史（验证用：登记前后 count 应当变）。 */
   derived: (sessionId: string) => { count: number; first: string; last: string } | null
-  supersede: (input: { sessionId: string; ids: readonly string[] }) => { ok: boolean; reason?: string; expanded?: number }
+  /**
+   * 切分支：客户端报活动路径上的**用户消息 id**，宿主遮蔽分歧尾部并重放目标后缀。
+   */
+  switchBranch: (input: {
+    sessionId: string
+    targetUserIds: readonly string[]
+  }) => Promise<{ ok: boolean; reason?: string; replayed?: number; shadowed?: number }>
   applyBranch: (input: {
     sessionId: string
     targetSeq: number
@@ -288,18 +295,39 @@ export function createRewindController(deps: ControllerDeps): RewindController {
     /** 模型真正看到的历史（验证用：登记前后 count 应当变）。 */
     derived: (sessionId) => adapter.derivedOf(sessionId),
 
-    supersede({ sessionId, ids }) {
-      // 客户端上报的是「用户消息 id」；这里按日志展开成整回合 —— 否则只剩提问消失、
-      // 回复变成孤儿。空数组 = 这个会话恢复完整历史。
-      const wanted = ids.filter((id) => typeof id === 'string' && id !== '')
-      if (wanted.length === 0) {
-        supersededRegistry.clear(sessionId)
-        return { ok: true, expanded: 0 }
-      }
-      const expanded = expandToTurns(adapter.eventsOf(sessionId), wanted)
+    /**
+     * 切分支：把模型的视野切到目标路径上（遮蔽分歧尾部 + 重放目标后缀）。
+     *
+     * 客户端只报**用户消息 id**（它只认得这些）；这里按日志展开成整回合，
+     * 用宿主的 surface 节点算前缀，规划写入后逐条追加。
+     * 任一前提不满足（没 surface / 没展开出东西 / 日志移动过）就整体拒绝。
+     */
+    async switchBranch({ sessionId, targetUserIds }) {
+      const wanted = targetUserIds.filter((id) => typeof id === 'string' && id !== '')
+      if (wanted.length === 0) return { ok: false, reason: 'empty target' }
+
+      const events = adapter.eventsOf(sessionId)
+      const expanded = expandToTurns(events, wanted)
       if (expanded.length === 0) return { ok: false, reason: 'no user message matched the reported ids' }
-      supersededRegistry.set(sessionId, expanded)
-      return { ok: true, expanded: expanded.length }
+
+      const nodes = adapter.surfaceNodes(sessionId)
+      if (nodes === null) return { ok: false, reason: 'host surface unavailable' }
+
+      let maxTurn = 0
+      for (const event of events) {
+        if (event.type !== 'turn/start') continue
+        const turn = (event.data as { turn?: unknown } | undefined)?.turn
+        if (typeof turn === 'number' && turn > maxTurn) maxTurn = turn
+      }
+
+      const plan = planSwitch({ events, nodes, targetIds: expanded, maxTurn })
+      if (!plan.ok) return { ok: false, reason: plan.reason }
+      if (plan.writes.length === 0) return { ok: true, replayed: 0, shadowed: 0 }
+
+      const expectedSeq = adapter.sessionSeq(sessionId)
+      const written = await adapter.appendWrites(sessionId, plan.writes, expectedSeq)
+      if (!written.ok) return { ok: false, reason: written.reason ?? 'append failed' }
+      return { ok: true, replayed: plan.replayed, shadowed: plan.shadowed }
     },
 
     impact: (sessionId, targetSeq) => {

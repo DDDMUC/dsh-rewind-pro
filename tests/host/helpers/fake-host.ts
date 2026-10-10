@@ -62,6 +62,30 @@ export class FakeHost implements HarnessAdapter {
   eventsOf(): ProjectedEvent[] {
     return this.events
   }
+  /** 宿主维护的 surface 节点；测试可置 null 来验"没有权威就拒绝写入"。 */
+  surfaceNodeList: number[] | null = [0]
+  surfaceNodes(): number[] | null {
+    return this.surfaceNodeList
+  }
+  /** 记录追加的写入，供断言。 */
+  appendedWrites: { type: string; data: unknown }[] = []
+  /** 期望 seq；与 this.seq 不符时 append 一律失败。 */
+  appendSeqGuard: number | null = null
+  appendOptionsSeen: unknown[] = []
+  async appendWrites(
+    _sessionId: string | undefined,
+    writes: readonly { type: string; data: unknown; surfaceOp?: unknown; sourceEventSeqs?: readonly number[] }[],
+    expectedSeq?: number,
+  ): Promise<{ ok: boolean; reason?: string; appended: number }> {
+    if (this.appendSeqGuard !== null && expectedSeq !== this.appendSeqGuard) {
+      return { ok: false, reason: `stale: expected seq ${String(expectedSeq)}`, appended: 0 }
+    }
+    for (const write of writes) {
+      this.appendedWrites.push({ type: write.type, data: write.data })
+      this.appendOptionsSeen.push({ surfaceOp: write.surfaceOp, sourceEventSeqs: write.sourceEventSeqs })
+    }
+    return { ok: true, appended: writes.length }
+  }
   derivedOf(): { count: number; first: string; last: string } | null {
     return null
   }

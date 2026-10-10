@@ -121,12 +121,14 @@ export function createRewindApi(deps: ApiDeps): RewindApi {
         return json(200, controller.derived(sid))
       }
 
-      case 'POST /supersede': {
-        const ids = Array.isArray(body.ids) ? body.ids.filter((id: unknown) => typeof id === 'string') as string[] : []
-        const result = controller.supersede({ sessionId: sid, ids })
+      case 'POST /branch/switch': {
+        const ids = Array.isArray(body.targetUserIds)
+          ? body.targetUserIds.filter((id: unknown) => typeof id === 'string') as string[]
+          : []
+        const result = await controller.switchBranch({ sessionId: sid, targetUserIds: ids })
         publish(sid)
         return result.ok
-          ? json(200, { ok: true, expanded: result.expanded, superseded: supersededRegistry.size() })
+          ? json(200, { ok: true, replayed: result.replayed ?? 0, shadowed: result.shadowed ?? 0 })
           : json(409, { error: result.reason })
       }
 
