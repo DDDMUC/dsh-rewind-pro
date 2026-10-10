@@ -22,6 +22,9 @@ import type { HiddenRange, MessageLite, PluginConfig } from '../core/types.js'
 import type { SurfaceOp } from '../core/strategy-surface.js'
 import type { ShadowPlan, SurfaceEventLike } from '../core/surface-window.js'
 import { planShadow } from '../core/surface-window.js'
+import type { ProjectedEvent } from '../core/active-path.js'
+import { expandToTurns } from '../core/active-path.js'
+import { supersededRegistry } from './projection.js'
 import { probeMessageProjection as runProjectionProbe } from './selftest.js'
 
 /** 插件身份：写进替身事件的 source，便于事后辨认日志里是谁写的。 */
@@ -70,6 +73,12 @@ export interface HarnessAdapter {
   sessionSeq: (sessionId?: string) => number
   canPatchDeriveMessages: () => boolean
   patchDeriveMessages: (ranges: HiddenRange[]) => Promise<boolean>
+  /**
+   * 原始事件（按 seq 顺序）—— 只用于把「一条用户消息」展开成它那一整个回合。
+   */
+  eventsOf: (sessionId?: string) => ProjectedEvent[]
+  /** 宿主派生历史（模型真正看到的）—— 自检与验证用。 */
+  derivedOf: (sessionId?: string) => { count: number; first: string; last: string } | null
   canAppendSurfaceOp: (sessionId?: string) => boolean
   /**
    * 有没有真的重跑能力（`sessionController.prompt`）。
@@ -263,6 +272,8 @@ export function createNullAdapter(notes: string[] = []): HarnessAdapter {
     sessionSeq: () => 0,
     canPatchDeriveMessages: () => false,
     patchDeriveMessages: async () => false,
+    eventsOf: () => [],
+    derivedOf: () => null,
     canAppendSurfaceOp: () => false,
     canPrompt: () => false,
     appendSurfaceOp: async () => false,
@@ -385,7 +396,12 @@ export function sessionToMessages(session: LiveSession): MessageLite[] {
     }
 
     if (type === 'user/message') {
-      messages.push({ seq, role: 'user', text: textOf(data.content) })
+      messages.push({
+        seq,
+        role: 'user',
+        text: textOf(data.content),
+        ...(typeof data.id === 'string' ? { id: data.id } : {}),
+      })
       continue
     }
 
@@ -720,6 +736,35 @@ export function detectAdapter(ctx: unknown): AdapterProbe {
     // Whether a specific append works is decided at call time, where a real
     // session exists and a rejection is a plain `false`.
     canAppendSurfaceOp: () => Boolean(sessions),
+    eventsOf: (sessionId) => {
+      const session = resolve(sessionId)
+      const events = safeCall<ProjectedEvent[]>(session, 'snapshotEvents') ?? []
+      return events.filter((event) => typeof event?.type === 'string')
+    },
+    derivedOf: (sessionId) => {
+      const session = resolve(sessionId)
+      const messages = safeCall<unknown[]>(session, 'deriveMessages')
+      if (messages === undefined) return null
+      const texts = messages
+        .map((message) => {
+          const content = (message as { content?: unknown }).content
+          if (typeof content === 'string') return content.trim()
+          if (Array.isArray(content)) {
+            return content
+              .map((part) => (typeof part === 'string' ? part : ((part as { text?: string }).text ?? '')))
+              .join(' ')
+              .trim()
+          }
+          return ''
+        })
+        .filter((text) => text !== '')
+      return {
+        count: messages.length,
+        textCount: texts.length,
+        first: (texts[0] ?? '').slice(0, 60),
+        last: (texts[texts.length - 1] ?? '').slice(0, 60),
+      }
+    },
     canPrompt,
     shadowWindow,
     planShadowFor,

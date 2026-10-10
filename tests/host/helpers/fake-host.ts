@@ -3,6 +3,7 @@
 // without the real harness — and the real adapter can be swapped in later.
 
 import type { CommandSpec, HarnessAdapter } from '../../../src/host/adapter'
+import type { ProjectedEvent } from '../../../src/core/active-path'
 import type { HiddenRange, MessageLite } from '../../../src/core/types'
 import type { SurfaceOp } from '../../../src/core/strategy-surface'
 import type { ShadowPlan } from '../../../src/core/surface-window'
@@ -55,6 +56,14 @@ export class FakeHost implements HarnessAdapter {
   }
   messagesOf(): MessageLite[] {
     return this.messages
+  }
+  /** 原始事件（控制器 supersede 展开用；需要的测试自己填）。 */
+  events: ProjectedEvent[] = []
+  eventsOf(): ProjectedEvent[] {
+    return this.events
+  }
+  derivedOf(): { count: number; first: string; last: string } | null {
+    return null
   }
   sessionSeq(): number {
     return this.messages.reduce((max, m) => Math.max(max, m.seq), 0)

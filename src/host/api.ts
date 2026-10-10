@@ -6,6 +6,7 @@
 // code with a JSON body.
 
 import { sanitizeSessionId } from '../core/ledger-store.js'
+import { supersededRegistry, projectionVerdict } from './projection.js'
 import type { LedgerState, PluginConfig } from '../core/types.js'
 import type { RewindController } from './hooks.js'
 
@@ -92,7 +93,13 @@ export function createRewindApi(deps: ApiDeps): RewindApi {
 
     switch (`${request.method} ${rest}`) {
       case 'GET /health':
-        return json(200, { ok: true, capability: controller.capability(), projection: deps.projectionVerdict?.() ?? null })
+        return json(200, {
+          ok: true,
+          capability: controller.capability(),
+          projection: deps.projectionVerdict?.() ?? null,
+          // 活动路径投影：装上了哪些类型、能不能真的开始隐藏
+          activePath: projectionVerdict(),
+        })
 
       case 'GET /state':
         return json(200, controller.state(sid))
@@ -107,6 +114,20 @@ export function createRewindApi(deps: ApiDeps): RewindApi {
           ? Math.min(1000, Math.max(1, Math.trunc(parsedLimit)))
           : undefined
         return json(200, { candidates: controller.candidates(sid, limit) })
+      }
+
+      case 'GET /derived': {
+        // 模型真正看到的历史（自检/验证用：登记前后 count 应当变）
+        return json(200, controller.derived(sid))
+      }
+
+      case 'POST /supersede': {
+        const ids = Array.isArray(body.ids) ? body.ids.filter((id: unknown) => typeof id === 'string') as string[] : []
+        const result = controller.supersede({ sessionId: sid, ids })
+        publish(sid)
+        return result.ok
+          ? json(200, { ok: true, expanded: result.expanded, superseded: supersededRegistry.size() })
+          : json(409, { error: result.reason })
       }
 
       case 'GET /plan': {

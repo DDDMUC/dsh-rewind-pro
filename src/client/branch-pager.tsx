@@ -57,9 +57,15 @@ export interface BranchPagerOptions {
   readText?: (row: HTMLElement) => string
   /** 编辑时向用户要新文本；默认用 prompt，测试里可注入。 */
   askText?: (current: string) => string | null
-  /** 把一行定位到会话日志里的 seq；拿不准就返回 null（猜 seq 会改错消息）。 */
   /** 把一行定位到会话日志里的 seq；拿不准就返回 null，或返回具体原因。 */
   seqOfRow?: (row: HTMLElement) => number | null | { reason: string }
+  /** 取一行的稳定消息 id（投影点名用）；拿不到返回 null。 */
+  idOfRow?: (row: HTMLElement) => string | null
+  /**
+   * 活动路径变了：offIds = 当前**不在**活动路径上的行（它们的整回合要被模型忽略）。
+   * 由宿主把它们从派生历史里删掉 —— 这就是"只改指针"的落点。
+   */
+  onOffPath?: (offIds: string[]) => void
   /** 真的改提示词 + 真的重跑（走宿主路由）。不提供就退回纯本地分页。 */
   applyBranch?: (input: { seq: number; text: string }) => Promise<{ ok: boolean; reason?: string }>
 }
@@ -392,6 +398,22 @@ export function mountBranchPager(options: BranchPagerOptions): BranchPagerHandle
     doc.body.append(warn)
   }
 
+  /**
+   * 把"不在活动路径上的行"报出去（宿主据此让模型看不到它们）。
+   *
+   * 只在**集合真的变了**时才报：刷新很频繁（DOM 一变就刷新），每次全量上报
+   * 既浪费又会让路由日志充满噪声。
+   */
+  let reportedOffPath = ''
+  const reportOffPath = (offIds: readonly string[]): void => {
+    const notify = options.onOffPath
+    if (!notify) return
+    const sorted = [...offIds].sort().join('|')
+    if (sorted === reportedOffPath) return
+    reportedOffPath = sorted
+    notify([...offIds])
+  }
+
   const refresh = (): void => {
     if (disposed) return
     const rows = collect(doc.body, userSelectors, assistantSelectors)
@@ -403,6 +425,19 @@ export function mountBranchPager(options: BranchPagerOptions): BranchPagerHandle
     bindRows(rows)
     renderControls()
     applyVisibility()
+
+    // 活动路径之外的行 → 让模型也看不到（宿主用投影删掉它们那一整个回合）
+    const idOf = options.idOfRow
+    if (idOf) {
+      const off: string[] = []
+      for (const entry of bound) {
+        if (!entry.row.isConnected) continue
+        if (isOnPath(model, entry.turnId)) continue
+        const id = idOf(entry.row)
+        if (typeof id === 'string' && id !== '') off.push(id)
+      }
+      reportOffPath(off)
+    }
   }
 
   const schedule = (): void => {

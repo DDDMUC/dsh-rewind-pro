@@ -423,6 +423,27 @@ export function apply(ctx: ClientContext, injectedConfig?: Partial<PluginConfig>
       }
       return null
     },
+
+    /** 行的稳定消息 id：来自 /candidates 的 id（按 seq 对上）。 */
+    idOfRow: (row) => {
+      const pool = seqCandidates.length > 0 ? seqCandidates : candidates
+      const found = findAnchors(document, DEFAULT_USER_SELECTORS)
+      const seqs = resolveAnchorSeqs(found, pool)
+      const index = found.findIndex((anchor) => anchor.element === row)
+      if (index < 0) return null
+      const seq = seqs[index]
+      if (seq === null || seq === undefined) return null
+      return pool.find((candidate) => candidate.seq === seq)?.id ?? null
+    },
+
+    /** 活动路径变了 → 让宿主把这些行从模型的历史里删掉（派生层，不改日志）。 */
+    onOffPath: (offIds) => {
+      void postJson(
+        '/supersede',
+        { sessionId: sessionIdOf(), ids: offIds },
+        config.apiPrefix ? { prefix: config.apiPrefix } : {},
+      )
+    },
     applyBranch: async ({ seq, text }) => {
       const result = await postJson<{ error?: string; shadowed?: boolean }>(
         '/branch/apply',

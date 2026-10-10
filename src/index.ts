@@ -20,6 +20,7 @@ import type { AdapterProbe } from './host/adapter.js'
 import { createRewindController } from './host/hooks.js'
 import type { RewindController } from './host/hooks.js'
 import { createRewindApi, DEFAULT_PREFIX } from './host/api.js'
+import { installMessageProjections, supersededRegistry } from './host/projection.js'
 import { registerCommands } from './host/commands.js'
 
 export const name = 'rewind-pro'
@@ -223,6 +224,13 @@ export function apply(ctx: HostContext, injectedConfig?: unknown): void {
     const paths = resolvePaths(ctx, config)
     const probe = detectAdapter(ctx)
     if (config.debug) log.info?.(`[rewind-pro] adapter bound=${probe.bound} ${probe.notes.join('; ')}`)
+
+    // 活动路径投影：让模型只看到当前选中的那条链（派生层过滤，不写日志）。
+    // 常驻注册 —— 宿主注明"注销会让用过它的会话拒绝继续派生"，所以只登记、不注销。
+    const projectionState = installMessageProjections(safeGet(ctx, 'sessions'), supersededRegistry)
+    if (config.debug) {
+      log.info?.(`[rewind-pro] projections installed=[${projectionState.installed.join(',')}] ready=${String(projectionState.ready)}`)
+    }
 
     const controller = createRewindController({
       adapter: probe.adapter,
