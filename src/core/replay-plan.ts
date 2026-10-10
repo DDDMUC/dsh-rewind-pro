@@ -94,8 +94,28 @@ export function planSwitch(input: SwitchPlanInput): SwitchPlan {
   }
   const sharedPrefix = shared
 
-  // 没有分歧：什么都不写
-  if (sharedPrefix >= nodes.length) return { ok: true, writes: [], sharedPrefix, replayed: 0, shadowed: 0 }
+  const wantsReplay = (): string[] => {
+    const keep = new Set<string>()
+    for (let index = 0; index < sharedPrefix; index++) {
+      const event = events[nodes[index] ?? -1]
+      if (event === undefined) continue
+      const id = idOf(event)
+      if (id !== null) keep.add(id)
+    }
+    return targetIds.filter((id) => id !== '' && !keep.has(id))
+  }
+
+  // 完全没有分歧（目标被当前 surface 覆盖）时，仍可能缺消息 —— 目标里有些消息
+  // 早先被遮蔽过、已经不在 surface 上。这时也要把它们重放出去。
+  // 真机上踩过：这里直接 return 空写入，导致"切回去"什么都不做。
+  if (sharedPrefix >= nodes.length) {
+    const missing = wantsReplay()
+    if (missing.length === 0) return { ok: true, writes: [], sharedPrefix, replayed: 0, shadowed: 0 }
+    // 没有要遮蔽的，只重放缺失部分
+    const writes: ReplayWrite[] = []
+    const plan = buildReplay(writes, missing, input.maxTurn, mint, events)
+    return { ok: true, writes, sharedPrefix, replayed: plan, shadowed: 0 }
+  }
 
   const shadowFrom = nodes[sharedPrefix]
   const shadowTo = nodes[nodes.length - 1]
@@ -144,12 +164,13 @@ export function planSwitch(input: SwitchPlanInput): SwitchPlan {
     const id = idOf(event)
     if (id !== null) prefixIds.add(id)
   }
+  const keepIds = prefixIds
 
   let replayed = 0
   /** 旧消息 id → 新消息 id：tool/result 的 sourceEventSeqs 要靠它重映射。 */
   const idRemap = new Map<string, string>()
   for (const id of targetTail) {
-    if (prefixIds.has(id)) continue
+    if (keepIds.has(id)) continue
     const at = positionOf.get(id)
     if (at === undefined) continue
     const source = events[at]
@@ -187,6 +208,65 @@ export function planSwitch(input: SwitchPlanInput): SwitchPlan {
   }
 
   return { ok: true, writes, sharedPrefix, replayed, shadowed: shadowedCount }
+}
+
+/**
+ * 把一组目标消息重放成写入（供"有遮蔽"和"纯重放"两条路径共用）。
+ *
+ * 每条消息一个独立回合（turn/start → 事件 → turn/end），内容原样复制、id 换新、
+ * 带 `replayedBy` 标记。
+ */
+function buildReplay(
+  writes: ReplayWrite[],
+  ids: readonly string[],
+  startTurn: number,
+  mint: () => string,
+  events: readonly PlanEvent[],
+): number {
+  const positionOf = new Map<string, number>()
+  for (const id of ids) {
+    const at = positionOfId(events, id)
+    if (at >= 0) positionOf.set(id, at)
+  }
+  const idRemap = new Map<string, string>()
+  let turn = startTurn
+  let replayed = 0
+
+  for (const id of ids) {
+    const at = positionOf.get(id)
+    if (at === undefined) continue
+    const source = events[at]
+    if (!source || !isMessage(source)) continue
+
+    turn += 1
+    const writeTurn = turn
+    const freshId = mint()
+    idRemap.set(id, freshId)
+
+    const data = structuredCloneish(source.data)
+    const record = RECORD(data)
+    if (record) {
+      if (typeof record.id === 'string') record.id = freshId
+      const message = RECORD(record.message)
+      if (message && typeof message.id === 'string') message.id = freshId
+      const sourceMeta = RECORD(record.source) ?? {}
+      sourceMeta.replayedBy = 'dsh-rewind-pro'
+      sourceMeta.originalSeq = source.seq
+      record.source = sourceMeta
+    }
+
+    writes.push({ type: 'turn/start', data: { turn: writeTurn } })
+    const remapped = remapSourceEventSeqs(source.sourceEventSeqs, idRemap)
+    writes.push({
+      type: source.type,
+      data,
+      surfaceOp: 'append',
+      ...(remapped === null ? {} : { sourceEventSeqs: remapped }),
+    })
+    writes.push({ type: 'turn/end', data: { turn: writeTurn, reason: { kind: 'completed' } } })
+    replayed += 1
+  }
+  return replayed
 }
 
 /** tool/result 的 sourceEventSeqs 重映射到新的 seq；非工具事件原样返回 null。 */
