@@ -436,11 +436,18 @@ export function apply(ctx: ClientContext, injectedConfig?: Partial<PluginConfig>
       return pool.find((candidate) => candidate.seq === seq)?.id ?? null
     },
 
-    /** 活动路径变了 → 让宿主把这些行从模型的历史里删掉（派生层，不改日志）。 */
-    onOffPath: (offIds) => {
+    /**
+     * 活动路径变了 → 让宿主把模型的视野切到这条路径上。
+     *
+     * 只报**用户消息 id**（我认得这些），宿主负责展开成整回合、遮蔽分歧尾部、
+     * 重放目标后缀。这条路径替代了早先的 /supersede（派生层投影）——
+     * 那条路被宿主自己的 foldSurface 证伪：投影路径不把 seq 加进 nodes，
+     * 对消息类型注册会整类删光。
+     */
+    onSwitch: (userIds) => {
       void postJson(
-        '/supersede',
-        { sessionId: sessionIdOf(), ids: offIds },
+        '/branch/switch',
+        { sessionId: sessionIdOf(), targetUserIds: userIds },
         config.apiPrefix ? { prefix: config.apiPrefix } : {},
       )
     },

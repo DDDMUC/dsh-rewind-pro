@@ -21,7 +21,7 @@ import { randomUUID } from 'node:crypto'
 import type { HiddenRange, MessageLite, PluginConfig } from '../core/types.js'
 import type { SurfaceOp } from '../core/strategy-surface.js'
 import type { ShadowPlan, SurfaceEventLike } from '../core/surface-window.js'
-import { planShadow } from '../core/surface-window.js'
+import { planShadow, foldSurface } from '../core/surface-window.js'
 import type { ProjectedEvent } from '../core/active-path.js'
 import { expandToTurns } from '../core/active-path.js'
 import { supersededRegistry } from './projection.js'
@@ -77,6 +77,18 @@ export interface HarnessAdapter {
    * 原始事件（按 seq 顺序）—— 只用于把「一条用户消息」展开成它那一整个回合。
    */
   eventsOf: (sessionId?: string) => ProjectedEvent[]
+  /** 宿主维护的当前 surface 节点（权威；拿不到返回 null，调用方必须拒绝写入）。 */
+  surfaceNodes: (sessionId?: string) => number[] | null
+  /**
+   * 追加一批写入（遮蔽 / 重放）。逐条 append，任一失败即停并回报。
+   *
+   * @param expectedSeq - 规划时看到的日志长度；不符就整体拒绝（不写半截）。
+   */
+  appendWrites: (
+    sessionId: string | undefined,
+    writes: readonly { type: string; data: unknown; surfaceOp?: unknown; sourceEventSeqs?: readonly number[] }[],
+    expectedSeq?: number,
+  ) => Promise<{ ok: boolean; reason?: string; appended: number }>
   /** 宿主派生历史（模型真正看到的）—— 自检与验证用。 */
   derivedOf: (sessionId?: string) => { count: number; first: string; last: string } | null
   canAppendSurfaceOp: (sessionId?: string) => boolean
@@ -180,6 +192,14 @@ export interface AdapterProbe {
 
 const UNKNOWN = '0.0.0-unknown'
 
+/** 把一条写入的 surface 元数据拼成 `Session.append` 的 opts。 */
+function buildAppendOptions(write: { surfaceOp?: unknown; sourceEventSeqs?: readonly number[] }): Record<string, unknown> {
+  return {
+    surfaceOp: write.surfaceOp,
+    ...(write.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: [...write.sourceEventSeqs] }),
+  }
+}
+
 /**
  * Read one property without ever throwing: cordis's ctx proxy throws for
  * properties outside the inject list, which must degrade, never crash.
@@ -273,6 +293,8 @@ export function createNullAdapter(notes: string[] = []): HarnessAdapter {
     canPatchDeriveMessages: () => false,
     patchDeriveMessages: async () => false,
     eventsOf: () => [],
+    surfaceNodes: () => null,
+    appendWrites: async () => ({ ok: false, reason: 'sessions service unavailable', appended: 0 }),
     derivedOf: () => null,
     canAppendSurfaceOp: () => false,
     canPrompt: () => false,
@@ -740,6 +762,33 @@ export function detectAdapter(ctx: unknown): AdapterProbe {
       const session = resolve(sessionId)
       const events = safeCall<ProjectedEvent[]>(session, 'snapshotEvents') ?? []
       return events.filter((event) => typeof event?.type === 'string')
+    },
+    surfaceNodes: (sessionId) => {
+      const session = resolve(sessionId)
+      if (!session) return null
+      const nodes = session.surface?.nodes
+      if (Array.isArray(nodes)) return nodes.filter((seq): seq is number => typeof seq === 'number')
+      // 宿主没暴露 surface：退回自己折叠（只作参考，权威仍在宿主）
+      const folded = foldSurface(safeCall<SurfaceEventLike[]>(session, 'snapshotEvents') ?? [])
+      return folded.nodes
+    },
+    appendWrites: async (sessionId, writes, expectedSeq) => {
+      const session = resolve(sessionId)
+      if (!session) return { ok: false, reason: 'no live session', appended: 0 }
+      const observed = typeof session.seq === 'number' ? session.seq : undefined
+      if (typeof expectedSeq === 'number' && observed !== expectedSeq) {
+        return { ok: false, reason: `stale: expected seq ${String(expectedSeq)}, found ${String(observed)}`, appended: 0 }
+      }
+      let appended = 0
+      for (const write of writes) {
+        const args: unknown[] = write.surfaceOp === undefined ? [] : [buildAppendOptions(write)]
+        const landed = safeCall<unknown>(session, 'append', write.type, write.data, ...args)
+        if (landed === undefined) {
+          return { ok: false, reason: `append ${write.type} failed`, appended }
+        }
+        appended += 1
+      }
+      return { ok: true, appended }
     },
     derivedOf: (sessionId) => {
       const session = resolve(sessionId)
