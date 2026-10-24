@@ -69,16 +69,37 @@ export class FakeHost implements HarnessAdapter {
   }
   /** 记录追加的写入，供断言。 */
   appendedWrites: { type: string; data: unknown }[] = []
-  /** 期望 seq；与 this.seq 不符时 append 一律失败。 */
-  appendSeqGuard: number | null = null
+  /**
+   * 日志长度（`session.seq` 的语义）。`appendWrites` 的期望值必须**等于**它 ——
+   * 差一就 stale。真实守卫就是这样，真机上曾因把"最后一条消息的 seq"当日志长度
+   * 传进来，导致三次重试全 stale。
+   */
+  logLengthValue = 7
+  logLength(): number | null {
+    return this.logLengthValue
+  }
+  /**
+   * append 实际看到的日志长度；默认跟 logLength() 一致。
+   * 把它改成别的值，就能模拟"调用方读完 seq 之后日志又长了"。
+   */
+  appendExpectsValue: number | null = null
+  /** 前 N 次 append 返回 stale（模拟活会话里日志在长）。 */
+  staleTimes = 0
+  appendCalls = 0
   appendOptionsSeen: unknown[] = []
   async appendWrites(
     _sessionId: string | undefined,
     writes: readonly { type: string; data: unknown; surfaceOp?: unknown; sourceEventSeqs?: readonly number[] }[],
     expectedSeq?: number,
   ): Promise<{ ok: boolean; reason?: string; appended: number }> {
-    if (this.appendSeqGuard !== null && expectedSeq !== this.appendSeqGuard) {
-      return { ok: false, reason: `stale: expected seq ${String(expectedSeq)}`, appended: 0 }
+    this.appendCalls += 1
+    const seen = this.appendExpectsValue ?? this.logLengthValue
+    if (this.staleTimes > 0) {
+      this.staleTimes -= 1
+      return { ok: false, reason: `stale: expected seq ${String(expectedSeq)}, found ${String(this.logLengthValue + 1)}`, appended: 0 }
+    }
+    if (expectedSeq !== seen) {
+      return { ok: false, reason: `stale: expected seq ${String(expectedSeq)}, found ${String(seen)}`, appended: 0 }
     }
     for (const write of writes) {
       this.appendedWrites.push({ type: write.type, data: write.data })

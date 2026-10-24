@@ -306,28 +306,42 @@ export function createRewindController(deps: ControllerDeps): RewindController {
       const wanted = targetUserIds.filter((id) => typeof id === 'string' && id !== '')
       if (wanted.length === 0) return { ok: false, reason: 'empty target' }
 
-      const events = adapter.eventsOf(sessionId)
-      const expanded = expandToTurns(events, wanted)
-      if (expanded.length === 0) return { ok: false, reason: 'no user message matched the reported ids' }
+      // 活会话的日志会自己长（用量/记账事件），乐观锁失败是常态，
+      // 所以**重读重排重试**；重试也一直失败才如实回报（绝不无限重试）。
+      let lastReason = 'unknown'
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const events = adapter.eventsOf(sessionId)
+        const expanded = expandToTurns(events, wanted)
+        if (expanded.length === 0) return { ok: false, reason: 'no user message matched the reported ids' }
 
-      const nodes = adapter.surfaceNodes(sessionId)
-      if (nodes === null) return { ok: false, reason: 'host surface unavailable' }
+        const nodes = adapter.surfaceNodes(sessionId)
+        if (nodes === null) return { ok: false, reason: 'host surface unavailable' }
 
-      let maxTurn = 0
-      for (const event of events) {
-        if (event.type !== 'turn/start') continue
-        const turn = (event.data as { turn?: unknown } | undefined)?.turn
-        if (typeof turn === 'number' && turn > maxTurn) maxTurn = turn
+        let maxTurn = 0
+        for (const event of events) {
+          if (event.type !== 'turn/start') continue
+          const turn = (event.data as { turn?: unknown } | undefined)?.turn
+          if (typeof turn === 'number' && turn > maxTurn) maxTurn = turn
+        }
+
+        const plan = planSwitch({ events, nodes, targetIds: expanded, maxTurn })
+        if (!plan.ok) return { ok: false, reason: plan.reason }
+        if (plan.writes.length === 0) return { ok: true, replayed: 0, shadowed: 0 }
+
+        // 注意比的是**日志长度**（session.seq），不是"最后一条消息的 seq" ——
+        // 两者差一，混用会让守卫永远不通过（真机上三次重试全 stale 就是这么来的）。
+        const written = await adapter.appendWrites(
+          sessionId,
+          plan.writes,
+          adapter.logLength(sessionId) ?? undefined,
+        )
+        if (written.ok) {
+          return { ok: true, replayed: plan.replayed, shadowed: plan.shadowed }
+        }
+        lastReason = written.reason ?? 'append failed'
+        if (!lastReason.includes('stale')) return { ok: false, reason: lastReason }
       }
-
-      const plan = planSwitch({ events, nodes, targetIds: expanded, maxTurn })
-      if (!plan.ok) return { ok: false, reason: plan.reason }
-      if (plan.writes.length === 0) return { ok: true, replayed: 0, shadowed: 0 }
-
-      const expectedSeq = adapter.sessionSeq(sessionId)
-      const written = await adapter.appendWrites(sessionId, plan.writes, expectedSeq)
-      if (!written.ok) return { ok: false, reason: written.reason ?? 'append failed' }
-      return { ok: true, replayed: plan.replayed, shadowed: plan.shadowed }
+      return { ok: false, reason: `log kept moving under us (${lastReason})` }
     },
 
     impact: (sessionId, targetSeq) => {

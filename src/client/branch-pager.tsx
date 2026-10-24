@@ -24,6 +24,7 @@ import {
   type Turn,
 } from '../core/branch.js'
 import { bridgeForeignEditor, hasForeignEditAction, hasForeignPlugin, openOwnEditor } from './inline-edit.js'
+import { normalizeRow, outermost } from './row-identity.js'
 
 const PAGER_CLASS = 'dsh-rewind-pro-pager'
 const ACTION_HOST_MARKER = 'dshet-action-host'
@@ -105,16 +106,11 @@ function actionHost(row: HTMLElement): HTMLElement {
 }
 
 /**
- * 只保留**最外层**的匹配元素。
+ * 同一层里只留最外层：一条消息在真机 DOM 里是嵌套的几层（见 row-identity）。
  *
- * 一条消息在真实 DOM 里是嵌套的几层（外层 flow div 带 data-chat-node-key，
- * 里面还有 <section data-turn-trigger>），多个选择器会同时命中它们 —— 那样
- * 同一条消息会被当成好几轮，翻页器也会重复注入。按"谁包含谁"去重即可。
+ * 去重规则只有这一份，锚点（findAnchors）与桥接的反解都用它 —— 三处各写一套
+ * 的后果实测过：同一条消息被认成不同元素，按元素身份一比对就全对不上。
  */
-function outermost(elements: HTMLElement[]): HTMLElement[] {
-  return elements.filter((element) => !elements.some((other) => other !== element && other.contains(element)))
-}
-
 function collect(root: ParentNode, userSelectors: string[], assistantSelectors: string[]): Rows {
   const users = outermost(Array.from(root.querySelectorAll<HTMLElement>(userSelectors.join(','))))
   const assistantsAll = outermost(Array.from(root.querySelectorAll<HTMLElement>(assistantSelectors.join(','))))
@@ -506,9 +502,26 @@ export function mountBranchPager(options: BranchPagerOptions): BranchPagerHandle
     label: '分页重跑',
     rowSelectors: userSelectors,
     onAction: (row, text) => {
-      const turnId = boundFor(row)
-      if (!turnId) return { ok: false, reason: '这一行还没进我的版本树，先翻一次页再试。' }
-      return realBranch(row, turnId, text)
+      // 先刷新再认行：对话区一直在重渲染，这个行元素可能已经被换掉了。
+      refresh()
+      // 它的编辑框锚在**它自己那一层**上，而我绑的是最外层 —— 真机里同一条
+      // 消息就是嵌套的两层 DOM。所以先把拿到的元素归一回绑定行，再按绑定行
+      // 去定位 seq；原来直接按元素身份查，落到另一层就必然查不到，报出来的
+      // 还是那句和真相无关的"先翻一次页再试"。
+      const host = normalizeRow(
+        bound.map((entry) => entry.row),
+        row,
+      )
+      const turnId = host ? boundFor(host) : undefined
+      if (!host || !turnId) {
+        // 真的认不出来就只有一种情况：这一行版本树刻意不认领（例如"加载更早"
+        // 插进来的历史）。说清原因，并且什么都不做。
+        return {
+          ok: false,
+          reason: '这一行不在版本树里（更早的历史版本树不认领），已取消，没有做任何改动。',
+        }
+      }
+      return realBranch(host, turnId, text)
     },
   })
 

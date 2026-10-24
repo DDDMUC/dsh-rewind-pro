@@ -95,7 +95,8 @@ describe('switchBranch（切分支）', () => {
 
   it('日志在写入前移动过（seq 不符）→ 整体拒绝', async () => {
     await setup()
-    host.appendSeqGuard = 5 // 期望 seq 与宿主当前不符
+    host.logLengthValue = 30
+    host.appendExpectsValue = 31 // 调用方读到 30，写入时日志已经变成 31
     const result = await controller.switchBranch({
       sessionId: 'session-1',
       targetUserIds: ['u1', 'u2'],
@@ -103,5 +104,23 @@ describe('switchBranch（切分支）', () => {
     expect(result.ok).toBe(false)
     expect(result.reason).toContain('seq')
     expect(host.appendedWrites).toHaveLength(0)
+  })
+
+  it('活会话里日志会自己长（用量/记账）→ 重读重排重试，而不是直接失败', async () => {
+    // 真机上踩过：读 seq 之后宿主又写了一条，第一次 append 被判 stale。
+    // 活会话里这是常态，所以要重试，而不是让用户看到"stale"。
+    await setup()
+    host.staleTimes = 1 // 第一次 append 失败，之后成功
+    const result = await controller.switchBranch({ sessionId: 'session-1', targetUserIds: ['u1', 'u2'] })
+    expect(result.ok).toBe(true)
+    expect(host.appendCalls).toBe(2)
+  })
+
+  it('重试也一直 stale（日志不停在长）→ 如实说明，不无限重试', async () => {
+    await setup()
+    host.staleTimes = 99
+    const result = await controller.switchBranch({ sessionId: 'session-1', targetUserIds: ['u1', 'u2'] })
+    expect(result.ok).toBe(false)
+    expect(result.reason).toContain('moving')
   })
 })

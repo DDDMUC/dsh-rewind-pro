@@ -446,3 +446,204 @@ describe('版本树翻页器', () => {
     expect(document.querySelector('.dsh-rewind-pro-pager')).toBeNull()
   })
 })
+
+// 真机上踩到的 bug：一条消息在 DOM 里是**嵌套的两层**（外层 flow div 带
+// data-chat-flow-key + 内层 input-message div 带 data-chat-node-key）。版本树
+// 按 outermost 只绑最外层，而 dsh-edit-turn 把编辑框锚在它自己那一层 ——
+// 桥接的几何反解于是落在另一层上，按元素身份查版本树必然查不到，报出来的是
+// 一句和真相无关的"先翻一次页再试"。
+describe('桥接：它的编辑框锚在嵌套的另一层', () => {
+  let handle: BranchPagerHandle | null = null
+  let storage = fakeStorage()
+
+  /** 一条消息 = 外层 flow div + 内层 input-message div（真机的形状）。 */
+  function nestedTurn(flowKey: string, nodeKey: string, text: string): HTMLElement {
+    const outer = document.createElement('div')
+    outer.setAttribute('data-chat-flow-key', flowKey)
+    const inner = document.createElement('div')
+    inner.setAttribute('data-chat-node-key', nodeKey)
+    const bubble = document.createElement('span')
+    bubble.setAttribute('data-message-text', text)
+    bubble.textContent = text
+    inner.append(bubble)
+    outer.append(inner)
+    return outer
+  }
+
+  /** happy-dom 的 rect 全是 0，几何反解会退化成长文档序：必须按元素各自钉一个。 */
+  function rectOf(element: HTMLElement, left: number, top: number, width: number, height: number): void {
+    element.getBoundingClientRect = () =>
+      ({
+        left,
+        top,
+        width,
+        height,
+        right: left + width,
+        bottom: top + height,
+        x: left,
+        y: top,
+        toJSON: () => ({}),
+      }) as DOMRect
+  }
+
+  const readText = (row: HTMLElement): string =>
+    row.querySelector('[data-message-text]')?.textContent?.trim() ?? ''
+
+  const mountPager = (extra: Partial<BranchPagerOptions>): BranchPagerHandle => {
+    handle = mountBranchPager({
+      sessionId: () => 'session-nested',
+      doc: document,
+      storage,
+      readText,
+      askText: () => null,
+      ...extra,
+    })
+    return handle
+  }
+
+  /** 它的编辑器：锚在 anchor 那一层下面（定位规则见 placeUnderRow）。 */
+  function foreignEditorUnder(anchor: HTMLElement, text: string): HTMLElement {
+    const layer = document.createElement('div')
+    layer.className = 'dshet-layer'
+    const editor = document.createElement('div')
+    editor.className = 'dshet-editor'
+    editor.setAttribute('data-dshet-editor', '1')
+    const rect = anchor.getBoundingClientRect()
+    editor.style.left = `${String(Math.round(rect.left))}px`
+    editor.style.top = `${String(Math.round(rect.bottom + 6))}px`
+    editor.style.width = `${String(Math.round(rect.width))}px`
+    const area = document.createElement('textarea')
+    area.value = text
+    const footer = document.createElement('div')
+    footer.className = 'dshet-footer'
+    const cancel = document.createElement('button')
+    cancel.type = 'button'
+    cancel.className = 'dshet-btn'
+    cancel.textContent = '取消'
+    cancel.addEventListener('click', () => {
+      layer.remove()
+    })
+    const save = document.createElement('button')
+    save.type = 'button'
+    save.className = 'dshet-btn dshet-btn-primary'
+    save.textContent = '保存'
+    footer.append(cancel, save)
+    editor.append(area, footer)
+    layer.append(editor)
+    document.body.append(layer)
+    return editor
+  }
+
+  const bridgeButton = (editor: HTMLElement): HTMLButtonElement | null =>
+    editor.querySelector<HTMLButtonElement>('.dsh-rewind-pro-bridge-action')
+
+  const errorText = (): string => document.querySelector('.dshet-error')?.textContent?.trim() ?? ''
+
+  const innerOf = (outer: HTMLElement): HTMLElement => outer.querySelector<HTMLElement>('[data-chat-node-key]') ?? outer
+
+  beforeEach(() => {
+    handle?.dispose()
+    handle = null
+    storage = fakeStorage()
+    const first = nestedTurn('flow-1:input-message-a', '1:input-message-a', '甲问')
+    const second = nestedTurn('flow-2:input-message-b', '2:input-message-b', '乙问')
+    rectOf(first, 0, 100, 500, 80)
+    rectOf(innerOf(first), 320, 110, 160, 60)
+    rectOf(second, 0, 200, 500, 80)
+    rectOf(innerOf(second), 320, 210, 160, 60)
+    document.body.innerHTML = ''
+    document.body.append(first, second)
+  })
+
+  afterEach(() => {
+    handle?.dispose()
+    handle = null
+  })
+
+  it('反解落在内层：照样认得出它是哪一轮（并按最外层那一行去定位 seq）', async () => {
+    const rows = Array.from(document.body.querySelectorAll<HTMLElement>('[data-chat-flow-key]'))
+    const outerA = rows[0]
+    const innerA = innerOf(outerA)
+    const located: HTMLElement[] = []
+    const calls: { seq: number; text: string }[] = []
+
+    mountPager({
+      seqOfRow: (row) => {
+        located.push(row)
+        return 7
+      },
+      applyBranch: async (input) => {
+        calls.push(input)
+        return { ok: true }
+      },
+    })
+
+    // 它的编辑框锚在**内层**（外层宽 500、内层宽 160，几何上只可能命中内层）
+    const editor = foreignEditorUnder(innerA, '甲问改')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(bridgeButton(editor)).not.toBeNull()
+
+    bridgeButton(editor)?.click()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    // 版本树认的是最外层那一行：seq 也必须按它去问（否则锚点身份对不上）
+    expect(located).toEqual([outerA])
+    expect(calls).toEqual([{ seq: 7, text: '甲问改' }])
+    expect(errorText()).toBe('')
+    expect(document.querySelector('.dshet-editor')).toBeNull()
+    expect(
+      outerA
+        .querySelector('.dsh-rewind-pro-pager-stepper[title^="输入版本"] .dsh-rewind-pro-pager-count')
+        ?.textContent?.trim(),
+    ).toBe('2/2')
+  })
+
+  it('反解落在外层、而版本树绑的是另一层时也认得出（两个方向都要）', async () => {
+    const rows = Array.from(document.body.querySelectorAll<HTMLElement>('[data-chat-flow-key]'))
+    const outerA = rows[0]
+    const calls: { seq: number; text: string }[] = []
+    mountPager({
+      seqOfRow: () => 9,
+      applyBranch: async (input) => {
+        calls.push(input)
+        return { ok: true }
+      },
+    })
+
+    // 同一个元素、同一套锚点规则，只是编辑框挂在外层：结论必须一样
+    const editor = foreignEditorUnder(outerA, '甲问改')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    bridgeButton(editor)?.click()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(calls).toEqual([{ seq: 9, text: '甲问改' }])
+    expect(errorText()).toBe('')
+  })
+
+  it('真的不在版本树里的行（更早的历史）：说清原因，且一个版本都不动', async () => {
+    const pager = mountPager({ seqOfRow: () => 7, applyBranch: async () => ({ ok: true }) })
+
+    // "加载更早"插到顶部的行：版本树刻意不认领它
+    const earlier = nestedTurn('flow-0:input-message-z', '0:input-message-z', '更早')
+    rectOf(earlier, 0, 0, 500, 80)
+    rectOf(innerOf(earlier), 320, 10, 160, 60)
+    document.body.insertBefore(earlier, document.body.firstChild)
+    pager.refresh()
+
+    const editor = foreignEditorUnder(innerOf(earlier), '更早改')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    bridgeButton(editor)?.click()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(errorText()).toContain('不在')
+    expect(document.querySelector('.dshet-editor')).not.toBeNull()
+    // 没有任何一轮被改动
+    for (const outer of Array.from(document.body.querySelectorAll<HTMLElement>('[data-chat-flow-key]'))) {
+      expect(
+        outer
+          .querySelector('.dsh-rewind-pro-pager-stepper[title^="输入版本"] .dsh-rewind-pro-pager-count')
+          ?.textContent?.trim() ?? '1/1',
+      ).toBe('1/1')
+    }
+  })
+})

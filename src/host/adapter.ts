@@ -77,6 +77,8 @@ export interface HarnessAdapter {
    * 原始事件（按 seq 顺序）—— 只用于把「一条用户消息」展开成它那一整个回合。
    */
   eventsOf: (sessionId?: string) => ProjectedEvent[]
+  /** 日志长度（`session.seq`，写入前的乐观锁要比的就是它；注意 sessionSeq 是"最后一条消息的 seq"，两者差一）。 */
+  logLength: (sessionId?: string) => number | null
   /** 宿主维护的当前 surface 节点（权威；拿不到返回 null，调用方必须拒绝写入）。 */
   surfaceNodes: (sessionId?: string) => number[] | null
   /**
@@ -192,6 +194,9 @@ export interface AdapterProbe {
 
 const UNKNOWN = '0.0.0-unknown'
 
+const sessionSeqOf = (session: LiveSession | undefined): number | undefined =>
+  session && typeof session.seq === 'number' ? session.seq : undefined
+
 /** 把一条写入的 surface 元数据拼成 `Session.append` 的 opts。 */
 function buildAppendOptions(write: { surfaceOp?: unknown; sourceEventSeqs?: readonly number[] }): Record<string, unknown> {
   return {
@@ -293,6 +298,7 @@ export function createNullAdapter(notes: string[] = []): HarnessAdapter {
     canPatchDeriveMessages: () => false,
     patchDeriveMessages: async () => false,
     eventsOf: () => [],
+    logLength: () => null,
     surfaceNodes: () => null,
     appendWrites: async () => ({ ok: false, reason: 'sessions service unavailable', appended: 0 }),
     derivedOf: () => null,
@@ -763,6 +769,7 @@ export function detectAdapter(ctx: unknown): AdapterProbe {
       const events = safeCall<ProjectedEvent[]>(session, 'snapshotEvents') ?? []
       return events.filter((event) => typeof event?.type === 'string')
     },
+    logLength: (sessionId) => sessionSeqOf(resolve(sessionId)) ?? null,
     surfaceNodes: (sessionId) => {
       const session = resolve(sessionId)
       if (!session) return null

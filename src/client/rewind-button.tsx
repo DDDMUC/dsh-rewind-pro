@@ -17,6 +17,7 @@
 // anchors.ts). An anchor without a matching candidate gets no button at all.
 
 import { resolveAnchorSeqs, type CandidateLike } from './anchors.js'
+import { outermost } from './row-identity.js'
 
 export interface AnchorInfo {
   element: HTMLElement
